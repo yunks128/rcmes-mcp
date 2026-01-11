@@ -148,3 +148,6 @@ Thumbs.db
 /output/
 /plots/
 /cache/
+
+# AI assistant files
+CLAUDE.md
