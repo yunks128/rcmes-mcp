@@ -122,13 +122,13 @@ with st.sidebar:
     st.divider()
     st.subheader("Region")
 
-    # Preset regions
+    # Preset regions - California first as default working example
     presets = {
-        "Custom": (None, None, None, None),
         "California": (32.0, 42.0, -124.0, -114.0),
         "Texas": (25.5, 36.5, -106.5, -93.5),
         "Florida": (24.5, 31.0, -87.5, -80.0),
         "Global": (-60.0, 90.0, -180.0, 180.0),
+        "Custom": (None, None, None, None),
     }
 
     preset = st.selectbox("Preset Region", options=list(presets.keys()))
@@ -269,6 +269,79 @@ with col_main:
             st.markdown(msg["content"])
             if msg.get("image"):
                 display_image(msg["image"])
+
+    # Show example queries when data is loaded
+    if st.session_state.current_dataset_id:
+        st.markdown("**Try these queries:**")
+        example_cols = st.columns(4)
+        examples = [
+            "Show statistics",
+            "Calculate trend",
+            "Generate map",
+            "Plot time series"
+        ]
+        for i, example in enumerate(examples):
+            if example_cols[i].button(example, key=f"example_{i}"):
+                add_message("user", example)
+                ds_id = st.session_state.current_dataset_id
+
+                if "statistics" in example.lower():
+                    result = analysis.calculate_statistics(dataset_id=ds_id)
+                    if "error" not in result:
+                        var = result.get('variable', 'Data')
+                        msg = f"**Statistics for {var}:**\n\n"
+                        msg += f"| Metric | Value |\n|--------|-------|\n"
+                        msg += f"| Mean | {result.get('mean', 0):.2f} |\n"
+                        msg += f"| Std Dev | {result.get('std', 0):.2f} |\n"
+                        msg += f"| Min | {result.get('min', 0):.2f} |\n"
+                        msg += f"| Max | {result.get('max', 0):.2f} |\n"
+                        if 'percentiles' in result:
+                            p = result['percentiles']
+                            msg += f"| 5th Percentile | {p.get('p5', 0):.2f} |\n"
+                            msg += f"| 25th Percentile | {p.get('p25', 0):.2f} |\n"
+                            msg += f"| Median (50th) | {p.get('p50', 0):.2f} |\n"
+                            msg += f"| 75th Percentile | {p.get('p75', 0):.2f} |\n"
+                            msg += f"| 95th Percentile | {p.get('p95', 0):.2f} |\n"
+                        add_message("assistant", msg)
+                    else:
+                        add_message("assistant", f"Error: {result['error']}")
+
+                elif "trend" in example.lower():
+                    result = analysis.calculate_trend(dataset_id=ds_id)
+                    if "error" not in result:
+                        var = result.get('variable', 'Data')
+                        msg = f"**Trend Analysis for {var}:**\n\n"
+                        msg += f"| Metric | Value |\n|--------|-------|\n"
+                        if 'slope' in result:
+                            msg += f"| Trend (per year) | {result['slope']:.4f} |\n"
+                        if 'slope_per_decade' in result:
+                            msg += f"| Trend (per decade) | {result['slope_per_decade']:.4f} |\n"
+                        if 'p_value' in result:
+                            p_val = result['p_value']
+                            sig = "Yes" if p_val < 0.05 else "No"
+                            msg += f"| P-value | {p_val:.4f} |\n"
+                            msg += f"| Significant (p<0.05) | {sig} |\n"
+                        if 'r_squared' in result:
+                            msg += f"| R-squared | {result['r_squared']:.4f} |\n"
+                        add_message("assistant", msg)
+                    else:
+                        add_message("assistant", f"Error: {result['error']}")
+
+                elif "map" in example.lower():
+                    result = visualization.generate_map(dataset_id=ds_id)
+                    if "error" not in result:
+                        add_message("assistant", "Generated map:", image=result.get("image_base64"))
+                    else:
+                        add_message("assistant", f"Error: {result['error']}")
+
+                elif "time series" in example.lower():
+                    result = visualization.generate_timeseries_plot(dataset_ids=[ds_id], show_trend=True)
+                    if "error" not in result:
+                        add_message("assistant", "Generated time series:", image=result.get("image_base64"))
+                    else:
+                        add_message("assistant", f"Error: {result['error']}")
+
+                st.rerun()
 
     # Chat input
     if prompt := st.chat_input("Ask about climate data..."):
