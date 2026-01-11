@@ -277,8 +277,12 @@ def load_climate_data(
         # Subset by time
         ds = ds.sel(time=slice(start_date, end_date))
 
+        # Convert longitude from -180/180 to 0-360 if needed (dataset uses 0-360)
+        lon_min_360 = lon_min if lon_min >= 0 else 360 + lon_min
+        lon_max_360 = lon_max if lon_max >= 0 else 360 + lon_max
+
         # Subset by spatial bounds
-        ds = ds.sel(lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max))
+        ds = ds.sel(lat=slice(lat_min, lat_max), lon=slice(lon_min_360, lon_max_360))
 
         # Store in session
         dataset_id = session_manager.store(
