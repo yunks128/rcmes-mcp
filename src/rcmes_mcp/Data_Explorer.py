@@ -15,16 +15,21 @@ from __future__ import annotations
 import base64
 import os
 from datetime import date
+from pathlib import Path
 
 import streamlit as st
 
 # Import RCMES tools directly
 from rcmes_mcp.tools import data_access, processing, analysis, indices, visualization
 
+# Load favicon
+favicon_path = Path(__file__).parent / "static" / "favicon.svg"
+favicon = favicon_path.read_text() if favicon_path.exists() else "R"
+
 # Page configuration
 st.set_page_config(
-    page_title="RCMES Climate Data Explorer",
-    page_icon="🌍",
+    page_title="RCMES Data Explorer",
+    page_icon=favicon_path.as_posix() if favicon_path.exists() else "R",
     layout="wide",
 )
 
@@ -217,7 +222,40 @@ with st.sidebar:
                     add_message("assistant", f"Analysis failed: {result['error']}")
                 else:
                     # Format result for display
-                    msg = f"**{analysis_type} Results:**\n\n```json\n{result}\n```"
+                    if analysis_type == "Statistics":
+                        var = result.get('variable', 'Data')
+                        msg = f"**Statistics for {var}:**\n\n"
+                        msg += f"| Metric | Value |\n|--------|-------|\n"
+                        msg += f"| Mean | {result.get('mean', 0):.2f} |\n"
+                        msg += f"| Std Dev | {result.get('std', 0):.2f} |\n"
+                        msg += f"| Min | {result.get('min', 0):.2f} |\n"
+                        msg += f"| Max | {result.get('max', 0):.2f} |\n"
+                        if 'percentiles' in result:
+                            p = result['percentiles']
+                            msg += f"| 5th Percentile | {p.get('p5', 0):.2f} |\n"
+                            msg += f"| 25th Percentile | {p.get('p25', 0):.2f} |\n"
+                            msg += f"| Median (50th) | {p.get('p50', 0):.2f} |\n"
+                            msg += f"| 75th Percentile | {p.get('p75', 0):.2f} |\n"
+                            msg += f"| 95th Percentile | {p.get('p95', 0):.2f} |\n"
+                    elif analysis_type == "Trend":
+                        var = result.get('variable', 'Data')
+                        msg = f"**Trend Analysis for {var}:**\n\n"
+                        msg += f"| Metric | Value |\n|--------|-------|\n"
+                        trend = result.get('trend', result)  # Handle nested or flat structure
+                        if 'slope_per_decade' in trend:
+                            unit = trend.get('unit', 'per decade')
+                            msg += f"| Trend | {trend['slope_per_decade']:.4f} {unit} |\n"
+                        if 'p_value' in trend:
+                            p_val = trend['p_value']
+                            sig = "Yes" if p_val < 0.05 else "No"
+                            msg += f"| P-value | {p_val:.2e} |\n"
+                            msg += f"| Significant (p<0.05) | {sig} |\n"
+                        if 'r_squared' in trend:
+                            msg += f"| R-squared | {trend['r_squared']:.4f} |\n"
+                        if 'interpretation' in result:
+                            msg += f"\n{result['interpretation']}"
+                    else:
+                        msg = f"**{analysis_type} Results:**\n\nCompleted successfully. New dataset ID: `{result.get('dataset_id', 'N/A')}`"
                     add_message("assistant", msg)
 
     st.divider()
@@ -312,17 +350,19 @@ with col_main:
                         var = result.get('variable', 'Data')
                         msg = f"**Trend Analysis for {var}:**\n\n"
                         msg += f"| Metric | Value |\n|--------|-------|\n"
-                        if 'slope' in result:
-                            msg += f"| Trend (per year) | {result['slope']:.4f} |\n"
-                        if 'slope_per_decade' in result:
-                            msg += f"| Trend (per decade) | {result['slope_per_decade']:.4f} |\n"
-                        if 'p_value' in result:
-                            p_val = result['p_value']
+                        trend = result.get('trend', result)
+                        if 'slope_per_decade' in trend:
+                            unit = trend.get('unit', 'per decade')
+                            msg += f"| Trend | {trend['slope_per_decade']:.4f} {unit} |\n"
+                        if 'p_value' in trend:
+                            p_val = trend['p_value']
                             sig = "Yes" if p_val < 0.05 else "No"
-                            msg += f"| P-value | {p_val:.4f} |\n"
+                            msg += f"| P-value | {p_val:.2e} |\n"
                             msg += f"| Significant (p<0.05) | {sig} |\n"
-                        if 'r_squared' in result:
-                            msg += f"| R-squared | {result['r_squared']:.4f} |\n"
+                        if 'r_squared' in trend:
+                            msg += f"| R-squared | {trend['r_squared']:.4f} |\n"
+                        if 'interpretation' in result:
+                            msg += f"\n{result['interpretation']}"
                         add_message("assistant", msg)
                     else:
                         add_message("assistant", f"Error: {result['error']}")
@@ -386,9 +426,90 @@ with col_main:
 - "List the variables"
 - "Show me the scenarios"
 - "What datasets are loaded?"
+- "What is the heatwave trend in California?"
 """
+        # Handle natural language climate questions
+        elif any(word in prompt_lower for word in ["heatwave", "heat wave", "temperature", "trend", "climate", "warming"]):
+            # Detect region
+            regions = {
+                "california": (32.0, 42.0, -124.0, -114.0),
+                "texas": (25.5, 36.5, -106.5, -93.5),
+                "florida": (24.5, 31.0, -87.5, -80.0),
+            }
+            region_name = "California"
+            region_bounds = regions["california"]
+            for name, bounds in regions.items():
+                if name in prompt_lower:
+                    region_name = name.title()
+                    region_bounds = bounds
+                    break
+
+            # Determine variable based on query
+            variable = "tasmax"  # Default to max temperature for heatwave queries
+            if "precipitation" in prompt_lower or "rain" in prompt_lower:
+                variable = "pr"
+            elif "humidity" in prompt_lower:
+                variable = "hurs"
+
+            with st.spinner(f"Loading data and analyzing for {region_name}..."):
+                # Load data
+                load_result = data_access.load_climate_data(
+                    variable=variable,
+                    model="ACCESS-CM2",
+                    scenario="ssp585",
+                    start_date="2050-01-01",
+                    end_date="2050-12-31",
+                    lat_min=region_bounds[0],
+                    lat_max=region_bounds[1],
+                    lon_min=region_bounds[2],
+                    lon_max=region_bounds[3],
+                )
+
+                if "error" in load_result:
+                    response = f"Error loading data: {load_result['error']}"
+                else:
+                    ds_id = load_result["dataset_id"]
+                    st.session_state.current_dataset_id = ds_id
+
+                    # Run appropriate analysis
+                    if "heatwave" in prompt_lower or "heat wave" in prompt_lower:
+                        result = indices.analyze_heatwaves(dataset_id=ds_id)
+                        if "error" not in result:
+                            response = f"**Heatwave Analysis for {region_name} (2050, SSP5-8.5):**\n\n"
+                            response += f"Model: ACCESS-CM2 | Variable: Daily Max Temperature\n\n"
+                            if "summary" in result:
+                                s = result["summary"]
+                                response += f"| Metric | Value |\n|--------|-------|\n"
+                                if s.get('mean_annual_hot_days') is not None:
+                                    response += f"| Hot Days (>90th percentile) | {s['mean_annual_hot_days']:.1f} days/year |\n"
+                                if s.get('mean_annual_heatwave_frequency') is not None:
+                                    response += f"| Heatwave Events | {s['mean_annual_heatwave_frequency']:.1f} per year |\n"
+                                if s.get('mean_heatwave_duration') is not None:
+                                    response += f"| Avg Duration | {s['mean_heatwave_duration']:.1f} days |\n"
+                            response += f"\nDataset ID: `{result.get('dataset_id', ds_id)}`"
+                        else:
+                            response = f"Error analyzing heatwaves: {result['error']}"
+                    else:
+                        # General trend analysis
+                        result = analysis.calculate_trend(dataset_id=ds_id)
+                        if "error" not in result:
+                            response = f"**Trend Analysis for {region_name} (2050, SSP5-8.5):**\n\n"
+                            response += f"| Metric | Value |\n|--------|-------|\n"
+                            trend = result.get('trend', result)
+                            if 'slope_per_decade' in trend:
+                                unit = trend.get('unit', 'per decade')
+                                response += f"| Trend | {trend['slope_per_decade']:.4f} {unit} |\n"
+                            if 'p_value' in trend:
+                                p_val = trend['p_value']
+                                sig = "Yes" if p_val < 0.05 else "No"
+                                response += f"| P-value | {p_val:.2e} |\n"
+                                response += f"| Significant | {sig} |\n"
+                            if 'interpretation' in result:
+                                response += f"\n{result['interpretation']}"
+                        else:
+                            response = f"Error calculating trend: {result['error']}"
         else:
-            response = "Use the sidebar controls to load and analyze data. Type 'help' for usage instructions."
+            response = "I can help with climate data analysis. Try asking:\n- 'What is the heatwave trend in California?'\n- 'What models are available?'\n- 'Show statistics' (after loading data)\n\nOr use the sidebar to load and analyze data."
 
         add_message("assistant", response)
         st.rerun()

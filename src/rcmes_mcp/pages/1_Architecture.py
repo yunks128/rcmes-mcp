@@ -5,12 +5,17 @@ This page explains how RCMES-MCP moves computation to the data
 rather than moving data to computation.
 """
 
+from pathlib import Path
+
 import streamlit as st
 import streamlit.components.v1 as components
 
+# Load favicon
+favicon_path = Path(__file__).parent.parent / "static" / "favicon.svg"
+
 st.set_page_config(
     page_title="Architecture - RCMES",
-    page_icon="A",
+    page_icon=favicon_path.as_posix() if favicon_path.exists() else "R",
     layout="wide",
 )
 
@@ -92,7 +97,7 @@ flowchart TB
     Data -->|Subset data| XArray
     XArray -->|Results| Tools
     Tools -->|JSON + Images| UI
-""", height=600)
+""", height=1000)
 
 st.divider()
 
@@ -140,6 +145,38 @@ with col3:
 st.divider()
 
 st.header("The MCP Protocol")
+
+st.markdown("""
+### What is MCP? (Simple Explanation)
+
+**MCP (Model Context Protocol)** is like giving an AI assistant a toolbox.
+
+Think of it like this:
+
+| Without MCP | With MCP |
+|-------------|----------|
+| AI can only talk | AI can talk AND do things |
+| "I don't have access to that data" | "Let me fetch that data for you" |
+| Limited to what it was trained on | Can use live tools and real data |
+
+**Real-world analogy:**
+
+Imagine you call a customer service agent:
+- **Without MCP**: They can only answer from memory
+- **With MCP**: They have a computer in front of them and can look up your account, check inventory, process orders
+
+**How it works:**
+
+1. **You ask a question** in plain English
+2. **AI figures out** what tools it needs
+3. **AI calls the tools** (like `load_climate_data`, `analyze_heatwaves`)
+4. **Tools return results** to the AI
+5. **AI explains the results** back to you
+
+The AI becomes a smart interface to powerful tools - you don't need to know Python or climate science.
+""")
+
+st.markdown("### MCP in Action")
 
 mermaid("""
 sequenceDiagram
@@ -255,7 +292,7 @@ flowchart LR
     Tools --> Session
     Session --> S3
     Session -.-> RCMED
-""", height=500)
+""", height=250)
 
 st.divider()
 
@@ -314,7 +351,7 @@ flowchart TB
     FS --> ZARR
     ZARR --> S3
     XA --> MPL
-""", height=550)
+""", height=715)
 
 st.divider()
 
