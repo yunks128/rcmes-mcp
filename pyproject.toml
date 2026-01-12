@@ -55,7 +55,7 @@ dev = [
 [project.scripts]
 rcmes-mcp = "rcmes_mcp.server:main"
 rcmes-gemini = "rcmes_mcp.gemini_client:main"
-rcmes-demo = "rcmes_mcp.demo_app:main"
+rcmes-demo = "rcmes_mcp.Data_Explorer:main"
 
 [project.urls]
 Homepage = "https://rcmes.jpl.nasa.gov/"

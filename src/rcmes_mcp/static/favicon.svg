@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <circle cx="50" cy="50" r="45" fill="#1f77b4"/>
+  <ellipse cx="50" cy="50" rx="45" ry="20" fill="none" stroke="#ffffff" stroke-width="2"/>
+  <ellipse cx="50" cy="50" rx="20" ry="45" fill="none" stroke="#ffffff" stroke-width="2"/>
+  <line x1="5" y1="50" x2="95" y2="50" stroke="#ffffff" stroke-width="2"/>
+  <text x="50" y="58" font-family="Arial, sans-serif" font-size="24" font-weight="bold" fill="#ffffff" text-anchor="middle">R</text>
+</svg>
