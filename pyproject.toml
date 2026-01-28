@@ -40,7 +40,8 @@ dependencies = [
     "cartopy>=0.22.0",
     "pydantic>=2.0.0",
     "httpx>=0.25.0",
-    "streamlit>=1.30.0",
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
 ]
 
 [project.optional-dependencies]
@@ -55,7 +56,7 @@ dev = [
 [project.scripts]
 rcmes-mcp = "rcmes_mcp.server:main"
 rcmes-gemini = "rcmes_mcp.gemini_client:main"
-rcmes-demo = "rcmes_mcp.Data_Explorer:main"
+rcmes-api = "rcmes_mcp.api:main"
 
 [project.urls]
 Homepage = "https://rcmes.jpl.nasa.gov/"
