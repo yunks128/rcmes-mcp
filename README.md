@@ -28,7 +28,30 @@ pip install -e .
 pip install -e ".[dev]"
 ```
 
-### Running with Gemini API (Recommended)
+### Web UI (React)
+
+Access the interactive web interface at:
+**http://34.31.165.25:8502**
+
+The React UI provides:
+- Climate model, variable, and scenario selection
+- Region presets (California, Texas, Florida, Global) or custom bounds
+- Time period selection
+- Analysis tools (statistics, trends, climatology, heatwaves)
+- Visualization (maps, time series, histograms)
+
+To run locally:
+```bash
+# Build and run (single server on port 8502)
+cd web && npm install && npm run build && cd ..
+rcmes-api
+
+# Or for development (hot reload)
+rcmes-api &                    # Terminal 1: API on :8502
+cd web && npm run dev          # Terminal 2: React on :5173
+```
+
+### Running with Gemini API
 
 ```bash
 # Set your Gemini API key

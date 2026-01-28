@@ -233,20 +233,75 @@ def open_nex_gddp_dataset(
         "default_cache_type": "readahead",
     }
 
-    ds = xr.open_mfdataset(
-        file_urls,
-        engine="h5netcdf",
-        chunks=chunks,
-        combine="by_coords",
-        parallel=True,
-        data_vars=[variable],  # Only load the requested variable
-        coords="minimal",  # Minimal coordinate loading
-        compat="override",  # Faster combining
-        storage_options=storage_options,
-    )
+    # Open files using fsspec file objects to avoid h5netcdf dimension scale issues
+    import h5netcdf
 
-    # Apply early spatial subsetting if bounds provided
-    # This significantly reduces data transfer for regional queries
+    fs = get_s3_filesystem()
+    datasets = []
+
+    for url in file_urls:
+        # Remove s3:// prefix for fsspec
+        s3_path = url.replace("s3://", "")
+
+        try:
+            # Open file with fsspec and pass to xarray
+            with fs.open(s3_path, 'rb') as f:
+                # Read file into memory for small files, or use h5netcdf directly
+                import h5py
+                import io
+
+                # For remote files, we need to read into a buffer
+                file_bytes = f.read()
+                buffer = io.BytesIO(file_bytes)
+
+                ds_single = xr.open_dataset(
+                    buffer,
+                    engine="h5netcdf",
+                    chunks=chunks,
+                )
+
+                # Select only the variable we need
+                if variable in ds_single.data_vars:
+                    ds_single = ds_single[[variable]]
+
+                datasets.append(ds_single)
+        except Exception as e:
+            # Try alternative: use scipy engine with downloaded temp file
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.nc', delete=False) as tmp:
+                tmp.write(fs.open(s3_path, 'rb').read())
+                tmp_path = tmp.name
+
+            ds_single = xr.open_dataset(tmp_path, chunks=chunks)
+            if variable in ds_single.data_vars:
+                ds_single = ds_single[[variable]]
+            datasets.append(ds_single)
+
+            # Clean up temp file
+            import os
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+
+    if not datasets:
+        raise FileNotFoundError(f"Could not open any data files for {variable}")
+
+    # Concatenate all datasets along time dimension
+    if len(datasets) == 1:
+        ds = datasets[0]
+    else:
+        ds = xr.concat(datasets, dim="time")
+
+    return _apply_spatial_subset(ds, lat_bounds, lon_bounds)
+
+
+def _apply_spatial_subset(
+    ds: xr.Dataset,
+    lat_bounds: tuple[float, float] | None,
+    lon_bounds: tuple[float, float] | None,
+) -> xr.Dataset:
+    """Apply spatial subsetting to dataset."""
     if lat_bounds or lon_bounds:
         sel_kwargs = {}
         if lat_bounds:
@@ -255,7 +310,6 @@ def open_nex_gddp_dataset(
             sel_kwargs["lon"] = slice(lon_bounds[0], lon_bounds[1])
         if sel_kwargs:
             ds = ds.sel(**sel_kwargs)
-
     return ds
 
 
