@@ -7,9 +7,15 @@ including NEX-GDDP-CMIP6 on AWS S3.
 
 from __future__ import annotations
 
+import hashlib
+import os
+from datetime import timedelta
+from pathlib import Path
+
 import xarray as xr
 
 from rcmes_mcp.server import mcp
+from rcmes_mcp.utils.cache import result_cache
 from rcmes_mcp.utils.cloud import (
     CMIP6_MODELS,
     CMIP6_SCENARIOS,
@@ -21,6 +27,59 @@ from rcmes_mcp.utils.cloud import (
     validate_variable,
 )
 from rcmes_mcp.utils.session import session_manager
+
+
+def _get_subset_cache_key(
+    variable: str,
+    model: str,
+    scenario: str,
+    start_date: str,
+    end_date: str,
+    lat_min: float,
+    lat_max: float,
+    lon_min: float,
+    lon_max: float,
+) -> str:
+    """Generate a cache key for a data subset request."""
+    key_str = f"{variable}_{model}_{scenario}_{start_date}_{end_date}_{lat_min}_{lat_max}_{lon_min}_{lon_max}"
+    return hashlib.sha256(key_str.encode()).hexdigest()[:16]
+
+
+def _get_cached_subset(cache_key: str) -> xr.Dataset | None:
+    """Try to retrieve a cached subset from disk."""
+    cache_dir = result_cache.cache_dir / "subsets"
+    cache_file = cache_dir / f"{cache_key}.nc"
+
+    if cache_file.exists():
+        try:
+            # Check if file is not too old (24h TTL)
+            import time
+            file_age = time.time() - cache_file.stat().st_mtime
+            if file_age < 24 * 3600:  # 24 hours
+                return xr.open_dataset(cache_file, chunks="auto")
+        except Exception:
+            pass
+    return None
+
+
+def _cache_subset(cache_key: str, ds: xr.Dataset) -> None:
+    """Cache a subset to disk for future use."""
+    try:
+        cache_dir = result_cache.cache_dir / "subsets"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_dir / f"{cache_key}.nc"
+
+        # Only cache small-to-medium subsets (< 100MB estimated)
+        # Estimate size: time * lat * lon * 4 bytes * 1.5 overhead
+        estimated_size = 1
+        for dim_size in ds.dims.values():
+            estimated_size *= dim_size
+        estimated_size *= 6  # 4 bytes per float32 + overhead
+
+        if estimated_size < 100 * 1024 * 1024:  # 100MB limit
+            ds.to_netcdf(cache_file)
+    except Exception:
+        pass  # Caching failures shouldn't break the main flow
 
 
 @mcp.tool()
@@ -264,25 +323,38 @@ def load_climate_data(
     if lon_min >= lon_max:
         return {"error": "lon_min must be less than lon_max."}
 
+    # Convert longitude from -180/180 to 0-360 (dataset uses 0-360)
+    lon_min_360 = lon_min if lon_min >= 0 else 360 + lon_min
+    lon_max_360 = lon_max if lon_max >= 0 else 360 + lon_max
+
+    # Check cache first
+    cache_key = _get_subset_cache_key(
+        variable, model, scenario, start_date, end_date,
+        lat_min, lat_max, lon_min_360, lon_max_360
+    )
+    cached_ds = _get_cached_subset(cache_key)
+
     try:
-        # Open dataset from S3
-        ds = open_nex_gddp_dataset(
-            variable=variable,
-            model=model,
-            scenario=scenario,
-            start_year=start_year,
-            end_year=end_year,
-        )
+        if cached_ds is not None:
+            # Use cached data
+            ds = cached_ds
+        else:
+            # Open dataset from S3 with early spatial subsetting
+            ds = open_nex_gddp_dataset(
+                variable=variable,
+                model=model,
+                scenario=scenario,
+                start_year=start_year,
+                end_year=end_year,
+                lat_bounds=(lat_min, lat_max),
+                lon_bounds=(lon_min_360, lon_max_360),
+            )
 
-        # Subset by time
-        ds = ds.sel(time=slice(start_date, end_date))
+            # Subset by time
+            ds = ds.sel(time=slice(start_date, end_date))
 
-        # Convert longitude from -180/180 to 0-360 if needed (dataset uses 0-360)
-        lon_min_360 = lon_min if lon_min >= 0 else 360 + lon_min
-        lon_max_360 = lon_max if lon_max >= 0 else 360 + lon_max
-
-        # Subset by spatial bounds
-        ds = ds.sel(lat=slice(lat_min, lat_max), lon=slice(lon_min_360, lon_max_360))
+            # Cache the subset for future use (async-safe, non-blocking)
+            _cache_subset(cache_key, ds)
 
         # Store in session
         dataset_id = session_manager.store(

@@ -85,8 +85,23 @@ CMIP6_VARIABLES = {
 
 @lru_cache(maxsize=1)
 def get_s3_filesystem() -> s3fs.S3FileSystem:
-    """Get an S3 filesystem for accessing NEX-GDDP-CMIP6 data."""
-    return s3fs.S3FileSystem(anon=True)
+    """Get an S3 filesystem for accessing NEX-GDDP-CMIP6 data.
+
+    Configured with optimized settings for climate data access:
+    - 8MB default block size for efficient large reads
+    - Connection pooling for reduced latency
+    - Read-ahead caching for sequential access
+    """
+    return s3fs.S3FileSystem(
+        anon=True,
+        default_block_size=8 * 1024 * 1024,  # 8MB blocks for better throughput
+        default_cache_type="readahead",  # Pre-fetch data for sequential reads
+        config_kwargs={
+            "max_pool_connections": 25,  # Increase connection pool
+            "connect_timeout": 30,
+            "read_timeout": 60,
+        },
+    )
 
 
 def build_nex_gddp_path(
@@ -140,11 +155,14 @@ def open_nex_gddp_dataset(
     start_year: int | None = None,
     end_year: int | None = None,
     chunks: dict[str, int] | None = None,
+    lat_bounds: tuple[float, float] | None = None,
+    lon_bounds: tuple[float, float] | None = None,
 ) -> xr.Dataset:
     """
     Open NEX-GDDP-CMIP6 dataset from S3.
 
     Uses xarray with Dask for lazy loading - data is only read when needed.
+    Optimized for fast access with early spatial subsetting.
 
     Args:
         variable: Climate variable
@@ -152,13 +170,21 @@ def open_nex_gddp_dataset(
         scenario: Emissions scenario
         start_year: Optional start year filter
         end_year: Optional end year filter
-        chunks: Dask chunk sizes (default: auto-chunking)
+        chunks: Dask chunk sizes (default: optimized for typical regional queries)
+        lat_bounds: Optional (min, max) latitude bounds for early subsetting
+        lon_bounds: Optional (min, max) longitude bounds for early subsetting
 
     Returns:
         xarray Dataset with lazy-loaded data
     """
+    # Optimized chunk sizes - smaller chunks for regional queries
+    # which is the most common use case
     if chunks is None:
-        chunks = {"time": 365, "lat": 100, "lon": 100}
+        # If we have spatial bounds, use smaller spatial chunks for efficiency
+        if lat_bounds or lon_bounds:
+            chunks = {"time": 365, "lat": 50, "lon": 50}
+        else:
+            chunks = {"time": 365, "lat": 100, "lon": 100}
 
     fs = get_s3_filesystem()
     base_path = build_nex_gddp_path(variable, model, scenario)
@@ -194,8 +220,18 @@ def open_nex_gddp_dataset(
             f"in year range {start_year}-{end_year}"
         )
 
-    # Open multi-file dataset
+    # Sort files for consistent ordering (helps with caching)
+    files = sorted(files)
+
+    # Open multi-file dataset with optimized settings
     file_urls = [f"s3://{f}" for f in files]
+
+    # Use fsspec's caching for file handles
+    storage_options = {
+        "anon": True,
+        "default_block_size": 8 * 1024 * 1024,  # 8MB blocks
+        "default_cache_type": "readahead",
+    }
 
     ds = xr.open_mfdataset(
         file_urls,
@@ -203,8 +239,22 @@ def open_nex_gddp_dataset(
         chunks=chunks,
         combine="by_coords",
         parallel=True,
-        storage_options={"anon": True},
+        data_vars=[variable],  # Only load the requested variable
+        coords="minimal",  # Minimal coordinate loading
+        compat="override",  # Faster combining
+        storage_options=storage_options,
     )
+
+    # Apply early spatial subsetting if bounds provided
+    # This significantly reduces data transfer for regional queries
+    if lat_bounds or lon_bounds:
+        sel_kwargs = {}
+        if lat_bounds:
+            sel_kwargs["lat"] = slice(lat_bounds[0], lat_bounds[1])
+        if lon_bounds:
+            sel_kwargs["lon"] = slice(lon_bounds[0], lon_bounds[1])
+        if sel_kwargs:
+            ds = ds.sel(**sel_kwargs)
 
     return ds
 
