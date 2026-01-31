@@ -18,9 +18,13 @@ from datetime import date
 from pathlib import Path
 
 import streamlit as st
+import xarray as xr
+import io
+import tempfile
 
 # Import RCMES tools directly
 from rcmes_mcp.tools import data_access, processing, analysis, indices, visualization
+from rcmes_mcp.utils.session import session_manager
 
 # Load favicon
 favicon_path = Path(__file__).parent / "static" / "favicon.svg"
@@ -70,6 +74,52 @@ def add_message(role: str, content: str, image: str | None = None):
         "content": content,
         "image": image,
     })
+
+
+def get_download_data(dataset_id: str, format: str = "netcdf"):
+    """
+    Prepare dataset for download in specified format.
+
+    Args:
+        dataset_id: ID of the dataset to download
+        format: Output format - "netcdf" or "csv"
+
+    Returns:
+        Tuple of (bytes_data, filename, mime_type)
+    """
+    try:
+        ds = session_manager.get(dataset_id)
+        metadata = session_manager.get_metadata(dataset_id)
+
+        # Compute if lazy (dask array)
+        if hasattr(ds, 'compute'):
+            ds = ds.compute()
+
+        var_name = metadata.variable or "data"
+        model_name = metadata.model or "model"
+
+        if format == "netcdf":
+            # Write to NetCDF bytes
+            buffer = io.BytesIO()
+            if isinstance(ds, xr.DataArray):
+                ds = ds.to_dataset(name=var_name)
+            ds.to_netcdf(buffer, engine='scipy')
+            buffer.seek(0)
+            filename = f"{var_name}_{model_name}_{dataset_id}.nc"
+            return buffer.getvalue(), filename, "application/x-netcdf"
+
+        elif format == "csv":
+            # Convert to DataFrame and then CSV
+            if isinstance(ds, xr.DataArray):
+                df = ds.to_dataframe().reset_index()
+            else:
+                df = ds.to_dataframe().reset_index()
+            csv_data = df.to_csv(index=False)
+            filename = f"{var_name}_{model_name}_{dataset_id}.csv"
+            return csv_data.encode('utf-8'), filename, "text/csv"
+
+    except Exception as e:
+        return None, None, str(e)
 
 
 # Header
@@ -185,14 +235,84 @@ with st.sidebar:
                 msg += f"**Dimensions:** {dims.get('time', 0)} time steps, {dims.get('lat', 0)}x{dims.get('lon', 0)} grid"
                 st.success(f"Dataset loaded: {dataset_id}")
                 add_message("assistant", msg)
+                # Clear any previous download state and rerun to show download section
+                if "download_ready" in st.session_state:
+                    del st.session_state.download_ready
+                st.rerun()
+
+    # Download section - always visible
+    st.divider()
+    st.subheader("Download Data")
+
+    if st.session_state.current_dataset_id:
+        dl_col1, dl_col2 = st.columns(2)
+        with dl_col1:
+            download_format = st.selectbox(
+                "Format",
+                options=["netcdf", "csv"],
+                format_func=lambda x: "NetCDF (.nc)" if x == "netcdf" else "CSV (.csv)",
+                key="download_format"
+            )
+        with dl_col2:
+            if st.button("Prepare Download", use_container_width=True):
+                with st.spinner("Preparing download..."):
+                    data, filename, mime = get_download_data(
+                        st.session_state.current_dataset_id,
+                        download_format
+                    )
+                    if data:
+                        st.session_state.download_ready = {
+                            "data": data,
+                            "filename": filename,
+                            "mime": mime
+                        }
+                    else:
+                        st.error(f"Failed to prepare download: {mime}")
+
+        # Show download button if ready
+        if "download_ready" in st.session_state and st.session_state.download_ready:
+            dl = st.session_state.download_ready
+            st.download_button(
+                label=f"⬇️ Download {dl['filename']}",
+                data=dl["data"],
+                file_name=dl["filename"],
+                mime=dl["mime"],
+                use_container_width=True,
+                type="primary"
+            )
+    else:
+        st.info("Load data first to enable download")
 
     st.divider()
     st.subheader("Analysis")
 
     analysis_type = st.selectbox(
         "Analysis Type",
-        options=["Statistics", "Trend", "Climatology", "Heatwaves", "Regional Mean"],
+        options=["Statistics", "Trend", "Climatology", "Heatwaves", "Regional Mean", "Correlation", "Bias", "RMSE"],
     )
+
+    # Show second dataset selector for comparison analyses
+    second_dataset_id = None
+    correlation_type = "temporal"  # Default value
+    if analysis_type in ["Correlation", "Bias", "RMSE"]:
+        loaded = data_access.list_loaded_datasets()
+        dataset_list = loaded.get("datasets", [])
+        if len(dataset_list) < 2:
+            st.warning("Load at least 2 datasets for comparison analysis")
+        else:
+            dataset_options = [ds['id'] for ds in dataset_list]
+            second_dataset_id = st.selectbox(
+                "Compare with Dataset",
+                options=[d for d in dataset_options if d != st.session_state.current_dataset_id],
+                help="Select the second dataset for comparison"
+            )
+            if analysis_type == "Correlation":
+                correlation_type = st.radio(
+                    "Correlation Type",
+                    options=["temporal", "spatial"],
+                    format_func=lambda x: "Temporal (over time at each grid point)" if x == "temporal" else "Spatial (over space at each time step)",
+                    horizontal=True
+                )
 
     if st.button("Run Analysis", use_container_width=True):
         if not st.session_state.current_dataset_id:
@@ -216,6 +336,37 @@ with st.sidebar:
                     result = analysis.calculate_regional_mean(dataset_id=ds_id)
                     if "dataset_id" in result:
                         st.session_state.current_dataset_id = result["dataset_id"]
+                elif analysis_type == "Correlation":
+                    if not second_dataset_id:
+                        result = {"error": "Select a second dataset for correlation"}
+                    else:
+                        result = analysis.calculate_correlation(
+                            dataset1_id=ds_id,
+                            dataset2_id=second_dataset_id,
+                            correlation_type=correlation_type
+                        )
+                        if "dataset_id" in result:
+                            st.session_state.current_dataset_id = result["dataset_id"]
+                elif analysis_type == "Bias":
+                    if not second_dataset_id:
+                        result = {"error": "Select a reference dataset for bias calculation"}
+                    else:
+                        result = analysis.calculate_bias(
+                            model_dataset_id=ds_id,
+                            reference_dataset_id=second_dataset_id
+                        )
+                        if "dataset_id" in result:
+                            st.session_state.current_dataset_id = result["dataset_id"]
+                elif analysis_type == "RMSE":
+                    if not second_dataset_id:
+                        result = {"error": "Select a reference dataset for RMSE calculation"}
+                    else:
+                        result = analysis.calculate_rmse(
+                            model_dataset_id=ds_id,
+                            reference_dataset_id=second_dataset_id
+                        )
+                        if "dataset_id" in result:
+                            st.session_state.current_dataset_id = result["dataset_id"]
 
                 if "error" in result:
                     st.error(result["error"])
@@ -254,6 +405,26 @@ with st.sidebar:
                             msg += f"| R-squared | {trend['r_squared']:.4f} |\n"
                         if 'interpretation' in result:
                             msg += f"\n{result['interpretation']}"
+                    elif analysis_type == "Correlation":
+                        msg = f"**Correlation Analysis:**\n\n"
+                        msg += f"| Metric | Value |\n|--------|-------|\n"
+                        msg += f"| Type | {result.get('correlation_type', 'temporal').capitalize()} |\n"
+                        msg += f"| Dataset 1 | `{result.get('dataset1_id', 'N/A')}` |\n"
+                        msg += f"| Dataset 2 | `{result.get('dataset2_id', 'N/A')}` |\n"
+                        msg += f"| Mean Correlation | {result.get('mean_correlation', 0):.4f} |\n"
+                        msg += f"\nResult dataset: `{result.get('dataset_id', 'N/A')}`"
+                    elif analysis_type == "Bias":
+                        msg = f"**Bias Analysis:**\n\n"
+                        msg += f"| Metric | Value |\n|--------|-------|\n"
+                        stats = result.get('statistics', {})
+                        msg += f"| Spatial Mean Bias | {stats.get('spatial_mean_bias', 0):.4f} |\n"
+                        msg += f"| Spatial RMSE | {stats.get('spatial_rmse', 0):.4f} |\n"
+                        msg += f"\nResult dataset: `{result.get('dataset_id', 'N/A')}`"
+                    elif analysis_type == "RMSE":
+                        msg = f"**RMSE Analysis:**\n\n"
+                        msg += f"| Metric | Value |\n|--------|-------|\n"
+                        msg += f"| Overall RMSE | {result.get('overall_rmse', 0):.4f} {result.get('units', '')} |\n"
+                        msg += f"\nResult dataset: `{result.get('dataset_id', 'N/A')}`"
                     else:
                         msg = f"**{analysis_type} Results:**\n\nCompleted successfully. New dataset ID: `{result.get('dataset_id', 'N/A')}`"
                     add_message("assistant", msg)

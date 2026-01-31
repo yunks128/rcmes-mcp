@@ -54,6 +54,12 @@ function App() {
   // Analysis state
   const [selectedAnalysis, setSelectedAnalysis] = useState('statistics');
   const [selectedViz, setSelectedViz] = useState('map');
+  const [secondDatasetId, setSecondDatasetId] = useState<string | null>(null);
+  const [correlationType, setCorrelationType] = useState<'temporal' | 'spatial'>('temporal');
+
+  // Download state
+  const [downloadFormat, setDownloadFormat] = useState<'netcdf' | 'csv'>('netcdf');
+  const [downloading, setDownloading] = useState(false);
 
   // App state
   const [currentDatasetId, setCurrentDatasetId] = useState<string | null>(null);
@@ -203,6 +209,32 @@ function App() {
       return;
     }
 
+    // Check for correlation - needs second dataset
+    if (selectedAnalysis === 'correlation') {
+      if (!secondDatasetId) {
+        setError('Please select a second dataset for correlation');
+        return;
+      }
+      setLoading(true);
+      setError(null);
+      try {
+        const result = await api.calculateCorrelation(currentDatasetId, secondDatasetId, correlationType);
+        if (result.dataset_id) {
+          setCurrentDatasetId(result.dataset_id);
+          await refreshDatasets();
+        }
+        const msg = `**Correlation Analysis:**\n\n| Metric | Value |\n|--------|-------|\n| Type | ${result.correlation_type} |\n| Mean Correlation | ${result.mean_correlation?.toFixed(4)} |\n\nResult dataset: \`${result.dataset_id}\``;
+        addMessage('assistant', msg);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : 'Correlation failed';
+        setError(errMsg);
+        addMessage('assistant', `Error: ${errMsg}`);
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
     setLoading(true);
     setError(null);
     try {
@@ -306,6 +338,25 @@ function App() {
       addMessage('assistant', `Error: ${errMsg}`);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Download dataset
+  const handleDownload = async () => {
+    if (!currentDatasetId) {
+      setError('Please load data first');
+      return;
+    }
+
+    setDownloading(true);
+    try {
+      await api.downloadDataset(currentDatasetId, downloadFormat);
+      addMessage('assistant', `Downloaded dataset as ${downloadFormat === 'netcdf' ? 'NetCDF (.nc)' : 'CSV (.csv)'}`);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'Download failed';
+      setError(errMsg);
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -538,6 +589,32 @@ function App() {
 
         <div className="divider" />
 
+        <h2>Download Data</h2>
+
+        {currentDatasetId ? (
+          <>
+            <div className="form-group">
+              <label>Format</label>
+              <select value={downloadFormat} onChange={(e) => setDownloadFormat(e.target.value as 'netcdf' | 'csv')}>
+                <option value="netcdf">NetCDF (.nc)</option>
+                <option value="csv">CSV (.csv)</option>
+              </select>
+            </div>
+            <button
+              className="btn-secondary"
+              onClick={handleDownload}
+              disabled={downloading}
+              style={{ width: '100%' }}
+            >
+              {downloading ? <span className="spinner" /> : 'Download'}
+            </button>
+          </>
+        ) : (
+          <p className="empty-hint">Load data first to enable download</p>
+        )}
+
+        <div className="divider" />
+
         <h2>Analysis</h2>
 
         <div className="form-group">
@@ -548,13 +625,51 @@ function App() {
             <option value="climatology">Climatology</option>
             <option value="heatwaves">Heatwaves</option>
             <option value="regional_mean">Regional Mean</option>
+            <option value="correlation">Correlation</option>
           </select>
         </div>
+
+        {selectedAnalysis === 'correlation' && (
+          <>
+            <div className="form-group">
+              <label>Compare with Dataset</label>
+              {datasets.length < 2 ? (
+                <p className="empty-hint" style={{ color: '#f59e0b', fontSize: '12px' }}>
+                  Load at least 2 datasets for correlation
+                </p>
+              ) : (
+                <select
+                  value={secondDatasetId || ''}
+                  onChange={(e) => setSecondDatasetId(e.target.value || null)}
+                >
+                  <option value="">Select dataset...</option>
+                  {datasets
+                    .filter((ds) => ds.id !== currentDatasetId)
+                    .map((ds) => (
+                      <option key={ds.id} value={ds.id}>
+                        {ds.id} ({ds.variable || 'N/A'})
+                      </option>
+                    ))}
+                </select>
+              )}
+            </div>
+            <div className="form-group">
+              <label>Correlation Type</label>
+              <select
+                value={correlationType}
+                onChange={(e) => setCorrelationType(e.target.value as 'temporal' | 'spatial')}
+              >
+                <option value="temporal">Temporal (over time)</option>
+                <option value="spatial">Spatial (over space)</option>
+              </select>
+            </div>
+          </>
+        )}
 
         <button
           className="btn-secondary"
           onClick={handleAnalysis}
-          disabled={loading || !currentDatasetId}
+          disabled={loading || !currentDatasetId || (selectedAnalysis === 'correlation' && !secondDatasetId)}
           style={{ width: '100%' }}
         >
           Run Analysis

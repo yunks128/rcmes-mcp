@@ -164,3 +164,61 @@ export async function sendChatMessage(
     body: JSON.stringify({ message, dataset_id }),
   });
 }
+
+// Download dataset
+export async function downloadDataset(
+  dataset_id: string,
+  format: 'netcdf' | 'csv' = 'netcdf'
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/download`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dataset_id, format }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new Error(error.detail || 'Download failed');
+  }
+
+  // Get filename from Content-Disposition header or generate one
+  const contentDisposition = response.headers.get('Content-Disposition');
+  let filename = `dataset_${dataset_id}.${format === 'netcdf' ? 'nc' : 'csv'}`;
+  if (contentDisposition) {
+    const match = contentDisposition.match(/filename=(.+)/);
+    if (match) filename = match[1];
+  }
+
+  // Create blob and download
+  const blob = await response.blob();
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  window.URL.revokeObjectURL(url);
+  document.body.removeChild(a);
+}
+
+// Correlation between two datasets
+export interface CorrelationResult {
+  success: boolean;
+  dataset_id: string;
+  dataset1_id: string;
+  dataset2_id: string;
+  correlation_type: string;
+  mean_correlation: number;
+  error?: string;
+}
+
+export async function calculateCorrelation(
+  dataset1_id: string,
+  dataset2_id: string,
+  correlation_type: 'temporal' | 'spatial' = 'temporal'
+): Promise<CorrelationResult> {
+  return fetchJson(`${API_BASE}/correlation`, {
+    method: 'POST',
+    body: JSON.stringify({ dataset1_id, dataset2_id, correlation_type }),
+  });
+}
