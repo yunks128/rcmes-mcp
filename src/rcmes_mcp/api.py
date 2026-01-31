@@ -109,6 +109,11 @@ class ETCCDIRequest(BaseModel):
     base_period_end: str | None = None
 
 
+class ChatRequest(BaseModel):
+    message: str = Field(..., description="User message")
+    dataset_id: str | None = Field(None, description="Current dataset ID for context")
+
+
 # ============================================================================
 # Metadata Endpoints
 # ============================================================================
@@ -302,6 +307,188 @@ async def visualize(request: VisualizationRequest) -> dict[str, Any]:
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
+
+
+# ============================================================================
+# Chat Endpoint
+# ============================================================================
+
+
+@app.post("/api/chat")
+async def chat(request: ChatRequest) -> dict[str, Any]:
+    """Process a chat message and return AI response with optional actions."""
+    message = request.message.lower()
+    dataset_id = request.dataset_id
+
+    # Simple keyword-based responses for demo
+    # In production, this would connect to an LLM
+    response_text = ""
+    action_result = None
+
+    # Helper function to safely format numbers
+    def fmt(value, decimals=2):
+        if value is None:
+            return "N/A"
+        try:
+            return f"{value:.{decimals}f}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    # Check for analysis requests
+    if any(word in message for word in ["statistics", "stats", "summary"]):
+        if dataset_id:
+            response_text = "I'll calculate the statistics for your current dataset."
+            try:
+                result = analysis.calculate_statistics(dataset_id=dataset_id)
+                if "error" not in result:
+                    action_result = {
+                        "dataset_id": result.get("dataset_id"),
+                        "message": f"**Statistics:**\n- Mean: {fmt(result.get('mean'))}\n- Std: {fmt(result.get('std'))}\n- Min: {fmt(result.get('min'))}\n- Max: {fmt(result.get('max'))}",
+                    }
+                else:
+                    response_text = f"Statistics calculation returned an error: {result.get('error', 'Unknown error')}"
+            except Exception as e:
+                response_text = f"I encountered an error calculating statistics: {str(e)}"
+        else:
+            response_text = "Please load a dataset first before requesting statistics. Use the sidebar controls to load climate data."
+
+    elif any(word in message for word in ["trend", "change", "increase", "decrease"]):
+        if dataset_id:
+            response_text = "I'll analyze the trend in your data."
+            try:
+                result = analysis.calculate_trend(dataset_id=dataset_id)
+                if "error" not in result:
+                    trend = result.get("trend", {})
+                    slope = trend.get("slope_per_decade")
+                    if slope is not None:
+                        direction = "increasing" if slope > 0 else "decreasing"
+                        action_result = {
+                            "dataset_id": result.get("dataset_id"),
+                            "message": f"**Trend Analysis:**\nThe data shows a {direction} trend of {abs(slope):.4f} per decade.",
+                        }
+                    else:
+                        response_text = "Trend analysis completed but no slope value was returned."
+                else:
+                    response_text = f"Trend analysis returned an error: {result.get('error', 'Unknown error')}"
+            except Exception as e:
+                response_text = f"I encountered an error analyzing the trend: {str(e)}"
+        else:
+            response_text = "Please load a dataset first to analyze trends."
+
+    elif any(word in message for word in ["heatwave", "heat wave", "extreme", "hot"]):
+        if dataset_id:
+            response_text = "I'll perform a heatwave analysis on your data."
+            try:
+                result = indices.analyze_heatwaves(dataset_id=dataset_id)
+                if "error" not in result:
+                    summary = result.get("summary", {})
+                    hot_days = summary.get('mean_annual_hot_days')
+                    heatwave_freq = summary.get('mean_annual_heatwave_frequency')
+                    hot_days_str = f"{hot_days:.1f}" if hot_days is not None else "N/A"
+                    heatwave_freq_str = f"{heatwave_freq:.1f}" if heatwave_freq is not None else "N/A"
+                    action_result = {
+                        "dataset_id": result.get("dataset_id"),
+                        "message": f"**Heatwave Analysis:**\n- Hot days per year: {hot_days_str}\n- Heatwave events: {heatwave_freq_str}/year",
+                    }
+                else:
+                    response_text = f"Heatwave analysis returned an error: {result.get('error', 'Unknown error')}"
+            except Exception as e:
+                response_text = f"I encountered an error with heatwave analysis: {str(e)}"
+        else:
+            response_text = "Please load temperature data first (tasmax is recommended for heatwave analysis)."
+
+    elif any(word in message for word in ["map", "spatial", "plot map"]):
+        if dataset_id:
+            response_text = "I'll generate a spatial map for you."
+            try:
+                result = visualization.generate_map(dataset_id=dataset_id, title="Climate Data Map")
+                if "error" not in result and result.get("image_base64"):
+                    action_result = {
+                        "image_base64": result["image_base64"],
+                        "message": "Here's the spatial map of your data.",
+                    }
+            except Exception as e:
+                response_text = f"I encountered an error generating the map: {str(e)}"
+        else:
+            response_text = "Please load a dataset first to generate a map visualization."
+
+    elif any(word in message for word in ["timeseries", "time series", "temporal", "over time"]):
+        if dataset_id:
+            response_text = "I'll generate a time series plot for you."
+            try:
+                result = visualization.generate_timeseries_plot(
+                    dataset_ids=[dataset_id],
+                    title="Climate Time Series",
+                    show_trend=True,
+                )
+                if "error" not in result and result.get("image_base64"):
+                    action_result = {
+                        "image_base64": result["image_base64"],
+                        "message": "Here's the time series plot showing how the data changes over time.",
+                    }
+            except Exception as e:
+                response_text = f"I encountered an error generating the time series: {str(e)}"
+        else:
+            response_text = "Please load a dataset first to generate a time series plot."
+
+    elif any(word in message for word in ["compare", "scenario", "ssp"]):
+        response_text = (
+            "To compare different scenarios:\n"
+            "1. Load data for each scenario you want to compare (e.g., SSP2-4.5 and SSP5-8.5)\n"
+            "2. Use the visualization tools to overlay them\n"
+            "3. Run trend analysis on each to quantify differences\n\n"
+            "SSP scenarios represent different emission pathways:\n"
+            "- **SSP1-2.6**: Sustainable development, low emissions\n"
+            "- **SSP2-4.5**: Middle of the road\n"
+            "- **SSP3-7.0**: Regional rivalry, high emissions\n"
+            "- **SSP5-8.5**: Fossil-fuel intensive, very high emissions"
+        )
+
+    elif any(word in message for word in ["help", "what can", "how do"]):
+        response_text = (
+            "I can help you with climate data analysis! Here's what I can do:\n\n"
+            "**Data Analysis:**\n"
+            "- Calculate statistics (mean, std, percentiles)\n"
+            "- Analyze temperature trends\n"
+            "- Detect heatwaves and extreme events\n\n"
+            "**Visualizations:**\n"
+            "- Generate spatial maps\n"
+            "- Create time series plots\n"
+            "- Compare different scenarios\n\n"
+            "**To get started:**\n"
+            "1. Use the sidebar to select model, variable, and region\n"
+            "2. Click 'Load Data' to fetch the climate data\n"
+            "3. Ask me questions or request analyses!"
+        )
+
+    elif any(word in message for word in ["hello", "hi", "hey"]):
+        response_text = (
+            "Hello! I'm your climate data assistant. I can help you:\n"
+            "- Analyze climate model projections\n"
+            "- Calculate statistics and trends\n"
+            "- Generate visualizations\n"
+            "- Understand climate scenarios\n\n"
+            "Load some data using the sidebar controls, then ask me anything!"
+        )
+
+    else:
+        if dataset_id:
+            response_text = (
+                "I can help you analyze your loaded dataset. Try asking me to:\n"
+                "- Show statistics\n"
+                "- Analyze the trend\n"
+                "- Generate a map\n"
+                "- Create a time series plot\n"
+                "- Detect heatwaves (for temperature data)"
+            )
+        else:
+            response_text = (
+                "To get started, please load some climate data using the controls in the sidebar. "
+                "Select a model, variable, region, and time period, then click 'Load Data'. "
+                "Once loaded, I can help you analyze and visualize the data!"
+            )
+
+    return {"response": response_text, "action_result": action_result}
 
 
 # ============================================================================

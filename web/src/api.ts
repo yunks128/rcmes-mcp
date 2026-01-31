@@ -144,3 +144,23 @@ export async function visualize(
 export async function healthCheck(): Promise<{ status: string }> {
   return fetchJson(`${API_BASE}/health`);
 }
+
+// Chat
+export interface ChatResponse {
+  response: string;
+  action_result?: {
+    dataset_id?: string;
+    image_base64?: string;
+    message?: string;
+  };
+}
+
+export async function sendChatMessage(
+  message: string,
+  dataset_id?: string
+): Promise<ChatResponse> {
+  return fetchJson(`${API_BASE}/chat`, {
+    method: 'POST',
+    body: JSON.stringify({ message, dataset_id }),
+  });
+}
