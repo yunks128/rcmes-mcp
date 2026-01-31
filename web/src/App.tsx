@@ -16,11 +16,22 @@ interface Message {
   image?: string;
 }
 
+interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: Date;
+}
+
 type Page = 'explorer' | 'architecture';
 
 function App() {
   // Navigation state
   const [currentPage, setCurrentPage] = useState<Page>('explorer');
+
+  // Chat state
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
 
   // Metadata state
   const [models, setModels] = useState<string[]>([]);
@@ -104,10 +115,9 @@ function App() {
   const handleLoadData = async () => {
     setLoading(true);
     setError(null);
-    setMessages([]); // Clear previous messages
+    setMessages([]);
 
     try {
-      // Load the data
       const result = await api.loadData({
         variable: selectedVariable,
         model: selectedModel,
@@ -126,7 +136,6 @@ function App() {
 
       const dims = result.dimensions;
 
-      // Add data summary message
       let summaryMsg = `## Data Loaded Successfully\n\n`;
       summaryMsg += `**Variable:** ${selectedVariable}\n`;
       summaryMsg += `**Model:** ${selectedModel}\n`;
@@ -297,6 +306,61 @@ function App() {
       addMessage('assistant', `Error: ${errMsg}`);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Send chat message
+  const handleSendChat = async () => {
+    if (!chatInput.trim()) return;
+
+    const userMessage: ChatMessage = {
+      role: 'user',
+      content: chatInput,
+      timestamp: new Date(),
+    };
+    setChatMessages((prev) => [...prev, userMessage]);
+    setChatInput('');
+    setChatLoading(true);
+
+    try {
+      // Send to chat API
+      const response = await api.sendChatMessage(chatInput, currentDatasetId || undefined);
+
+      const assistantMessage: ChatMessage = {
+        role: 'assistant',
+        content: response.response,
+        timestamp: new Date(),
+      };
+      setChatMessages((prev) => [...prev, assistantMessage]);
+
+      // If the response includes an action result, add it to the main messages
+      if (response.action_result) {
+        if (response.action_result.image_base64) {
+          addMessage('assistant', response.action_result.message || 'Generated visualization:', response.action_result.image_base64);
+        } else if (response.action_result.dataset_id) {
+          setCurrentDatasetId(response.action_result.dataset_id);
+          await refreshDatasets();
+          addMessage('assistant', response.action_result.message || `Analysis complete. Dataset ID: ${response.action_result.dataset_id}`);
+        }
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'Failed to send message';
+      const errorMessage: ChatMessage = {
+        role: 'assistant',
+        content: `Sorry, I encountered an error: ${errMsg}`,
+        timestamp: new Date(),
+      };
+      setChatMessages((prev) => [...prev, errorMessage]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
+  // Handle chat input key press
+  const handleChatKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendChat();
     }
   };
 
@@ -521,9 +585,37 @@ function App() {
 
       {/* Main Content */}
       <main className="main-content">
-        <div className="results-area">
-          <div className="results-main">
-            <div className="card">
+        <div className="explorer-layout">
+          {/* Main Content Column */}
+          <div className="main-column">
+            {/* Loaded Datasets Section */}
+            <div className="datasets-section">
+              <h3>Loaded Datasets</h3>
+              <div className="datasets-list">
+                {datasets.length === 0 ? (
+                  <p className="empty-hint">No datasets loaded</p>
+                ) : (
+                  datasets.map((ds) => (
+                    <div
+                      key={ds.id}
+                      className={`dataset-item ${ds.id === currentDatasetId ? 'selected' : ''}`}
+                      onClick={() => setCurrentDatasetId(ds.id)}
+                    >
+                      <div className="dataset-detail"><span className="label">ID:</span> <code>{ds.id}</code></div>
+                      <div className="dataset-detail"><span className="label">Variable:</span> {ds.variable || 'N/A'}</div>
+                      <div className="dataset-detail"><span className="label">Model:</span> {ds.model || 'N/A'}</div>
+                      <div className="dataset-detail"><span className="label">Scenario:</span> {ds.scenario || 'N/A'}</div>
+                      {ds.time_range && (
+                        <div className="dataset-detail"><span className="label">Time:</span> {ds.time_range[0]} to {ds.time_range[1]}</div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Results Section */}
+            <div className="card results-card">
               <h2 style={{ marginTop: 0 }}>Results</h2>
 
               {error && <div className="alert error">{error}</div>}
@@ -571,37 +663,81 @@ function App() {
             </div>
           </div>
 
-          <div className="results-sidebar">
-            <h3>Loaded Datasets</h3>
-            {datasets.length === 0 ? (
-              <p className="empty-state" style={{ padding: '20px 0' }}>
-                No datasets loaded
-              </p>
-            ) : (
-              datasets.map((ds) => (
-                <div
-                  key={ds.id}
-                  className={`dataset-item ${ds.id === currentDatasetId ? 'selected' : ''}`}
-                  onClick={() => setCurrentDatasetId(ds.id)}
-                >
-                  <code>{ds.id.slice(0, 8)}...</code>
-                  <div className="meta">
-                    {ds.variable} | {ds.model} | {ds.scenario}
+          {/* Chat Panel */}
+          <div className="chat-panel">
+            <div className="chat-header">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" width="20" height="20">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H8.25m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H12m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 0 1-2.555-.337A5.972 5.972 0 0 1 5.41 20.97a5.969 5.969 0 0 1-.474-.065 4.48 4.48 0 0 0 .978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25Z" />
+              </svg>
+              <h3>RCMES Copilot</h3>
+            </div>
+
+            <div className="chat-messages">
+              {chatMessages.length === 0 ? (
+                <div className="chat-welcome">
+                  <div className="chat-welcome-icon">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" />
+                    </svg>
+                  </div>
+                  <p className="chat-welcome-title">RCMES Copilot</p>
+                  <p className="chat-welcome-hint">Ask questions about climate data, request analyses, or get help understanding your results.</p>
+                  <div className="chat-suggestions">
+                    <button onClick={() => setChatInput('What is the temperature trend?')}>Temperature trend?</button>
+                    <button onClick={() => setChatInput('Show me a map of the data')}>Show map</button>
+                    <button onClick={() => setChatInput('What are the statistics?')}>Get statistics</button>
                   </div>
                 </div>
-              ))
-            )}
+              ) : (
+                chatMessages.map((msg, i) => (
+                  <div key={i} className={`chat-message ${msg.role}`}>
+                    <div className="chat-message-content">
+                      {msg.content}
+                    </div>
+                    <div className="chat-message-time">
+                      {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </div>
+                  </div>
+                ))
+              )}
+              {chatLoading && (
+                <div className="chat-message assistant">
+                  <div className="chat-typing">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </div>
+                </div>
+              )}
+            </div>
 
-            {currentDatasetId && (
-              <>
-                <div className="divider" />
-                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                  <strong>Current:</strong>
-                  <br />
-                  <code>{currentDatasetId}</code>
-                </p>
-              </>
-            )}
+            {/* Always show suggestion buttons */}
+            <div className="chat-quick-actions">
+              <button onClick={() => setChatInput('Show statistics')} disabled={chatLoading}>Statistics</button>
+              <button onClick={() => setChatInput('Analyze the trend')} disabled={chatLoading}>Trend</button>
+              <button onClick={() => setChatInput('Generate a map')} disabled={chatLoading}>Map</button>
+              <button onClick={() => setChatInput('Show time series')} disabled={chatLoading}>Time Series</button>
+            </div>
+
+            <div className="chat-input-area">
+              <textarea
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={handleChatKeyPress}
+                placeholder="Ask about climate data..."
+                rows={2}
+                disabled={chatLoading}
+              />
+              <button
+                onClick={handleSendChat}
+                disabled={chatLoading || !chatInput.trim()}
+                className="chat-send-btn"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" width="20" height="20">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5" />
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
       </main>

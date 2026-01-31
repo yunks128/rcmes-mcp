@@ -187,7 +187,7 @@ def create_gemini_model():
 
     # Create model with function calling
     model = genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
+        model_name="gemini-2.5-flash",
         system_instruction="""You are a climate research assistant with access to NASA's NEX-GDDP-CMIP6 dataset.
 
 This dataset contains 38TB of downscaled climate projections from CMIP6 models at 0.25° resolution.
