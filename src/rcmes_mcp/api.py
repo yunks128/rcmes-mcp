@@ -18,8 +18,12 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
+import io
+import xarray as xr
+
+from rcmes_mcp.utils.session import session_manager
 
 # Import RCMES tools
 from rcmes_mcp.tools import analysis, data_access, indices, processing, visualization
@@ -107,6 +111,17 @@ class ETCCDIRequest(BaseModel):
     threshold: float | None = None
     base_period_start: str | None = None
     base_period_end: str | None = None
+
+
+class DownloadRequest(BaseModel):
+    dataset_id: str = Field(..., description="Dataset ID to download")
+    format: str = Field("netcdf", description="Download format: 'netcdf' or 'csv'")
+
+
+class CorrelationRequest(BaseModel):
+    dataset1_id: str = Field(..., description="First dataset ID")
+    dataset2_id: str = Field(..., description="Second dataset ID")
+    correlation_type: str = Field("temporal", description="'temporal' or 'spatial'")
 
 
 class ChatRequest(BaseModel):
@@ -304,6 +319,73 @@ async def visualize(request: VisualizationRequest) -> dict[str, Any]:
             detail=f"Unknown visualization type: {viz_type}. Valid types: map, timeseries, histogram",
         )
 
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+# ============================================================================
+# Download Endpoint
+# ============================================================================
+
+
+@app.post("/api/download")
+async def download_dataset(request: DownloadRequest):
+    """Download a dataset as NetCDF or CSV."""
+    try:
+        ds = session_manager.get(request.dataset_id)
+        metadata = session_manager.get_metadata(request.dataset_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    # Compute if lazy (dask array)
+    if hasattr(ds, 'compute'):
+        ds = ds.compute()
+
+    var_name = metadata.variable or "data"
+    model_name = metadata.model or "model"
+
+    if request.format == "netcdf":
+        buffer = io.BytesIO()
+        if isinstance(ds, xr.DataArray):
+            ds = ds.to_dataset(name=var_name)
+        ds.to_netcdf(buffer, engine='scipy')
+        buffer.seek(0)
+        filename = f"{var_name}_{model_name}_{request.dataset_id}.nc"
+        return StreamingResponse(
+            buffer,
+            media_type="application/x-netcdf",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    elif request.format == "csv":
+        if isinstance(ds, xr.DataArray):
+            df = ds.to_dataframe().reset_index()
+        else:
+            df = ds.to_dataframe().reset_index()
+        csv_data = df.to_csv(index=False)
+        filename = f"{var_name}_{model_name}_{request.dataset_id}.csv"
+        return StreamingResponse(
+            io.BytesIO(csv_data.encode('utf-8')),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    else:
+        raise HTTPException(status_code=400, detail="Format must be 'netcdf' or 'csv'")
+
+
+# ============================================================================
+# Correlation Endpoint
+# ============================================================================
+
+
+@app.post("/api/correlation")
+async def calculate_correlation(request: CorrelationRequest) -> dict[str, Any]:
+    """Calculate correlation between two datasets."""
+    result = analysis.calculate_correlation(
+        dataset1_id=request.dataset1_id,
+        dataset2_id=request.dataset2_id,
+        correlation_type=request.correlation_type,
+    )
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
