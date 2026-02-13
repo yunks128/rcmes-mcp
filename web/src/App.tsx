@@ -42,7 +42,9 @@ function App() {
   // Form state
   const [selectedModel, setSelectedModel] = useState('ACCESS-CM2');
   const [selectedVariable, setSelectedVariable] = useState('tasmax');
-  const [selectedScenario, setSelectedScenario] = useState('ssp585');
+  const [selectedScenarios, setSelectedScenarios] = useState<string[]>(['ssp585']);
+  const [allDatasetIds, setAllDatasetIds] = useState<string[]>([]);
+  const [scenarioLabels, setScenarioLabels] = useState<string[]>([]);
   const [selectedRegion, setSelectedRegion] = useState('California');
   const [latMin, setLatMin] = useState(32.0);
   const [latMax, setLatMax] = useState(42.0);
@@ -119,75 +121,107 @@ function App() {
 
   // Load data with auto-visualization
   const handleLoadData = async () => {
+    if (selectedScenarios.length === 0) {
+      setError('Please select at least one emissions scenario');
+      return;
+    }
+
     setLoading(true);
     setError(null);
     setMessages([]);
 
     try {
-      const result = await api.loadData({
-        variable: selectedVariable,
-        model: selectedModel,
-        scenario: selectedScenario,
-        start_date: startDate,
-        end_date: endDate,
-        lat_min: latMin,
-        lat_max: latMax,
-        lon_min: lonMin,
-        lon_max: lonMax,
-      });
+      // Load data for each selected scenario
+      const loadedIds: string[] = [];
+      const labels: string[] = [];
 
-      const datasetId = result.dataset_id;
-      setCurrentDatasetId(datasetId);
+      for (const scenario of selectedScenarios) {
+        const result = await api.loadData({
+          variable: selectedVariable,
+          model: selectedModel,
+          scenario,
+          start_date: startDate,
+          end_date: endDate,
+          lat_min: latMin,
+          lat_max: latMax,
+          lon_min: lonMin,
+          lon_max: lonMax,
+        });
+        loadedIds.push(result.dataset_id);
+        labels.push(scenario);
+
+        const dims = result.dimensions;
+        let summaryMsg = `## Data Loaded: ${scenario}\n\n`;
+        summaryMsg += `**Variable:** ${selectedVariable}\n`;
+        summaryMsg += `**Model:** ${selectedModel}\n`;
+        summaryMsg += `**Scenario:** ${scenario}\n`;
+        summaryMsg += `**Region:** ${selectedRegion} (${latMin}°-${latMax}°N, ${lonMin}°-${lonMax}°E)\n`;
+        summaryMsg += `**Period:** ${startDate} to ${endDate}\n\n`;
+        summaryMsg += `**Dimensions:** ${dims.time} time steps, ${dims.lat}×${dims.lon} grid\n`;
+        summaryMsg += `**Dataset ID:** \`${result.dataset_id}\``;
+        addMessage('assistant', summaryMsg);
+      }
+
+      // Set the first loaded dataset as current, track all
+      setCurrentDatasetId(loadedIds[0]);
+      setAllDatasetIds(loadedIds);
+      setScenarioLabels(labels);
       await refreshDatasets();
 
-      const dims = result.dimensions;
-
-      let summaryMsg = `## Data Loaded Successfully\n\n`;
-      summaryMsg += `**Variable:** ${selectedVariable}\n`;
-      summaryMsg += `**Model:** ${selectedModel}\n`;
-      summaryMsg += `**Scenario:** ${selectedScenario}\n`;
-      summaryMsg += `**Region:** ${selectedRegion} (${latMin}°-${latMax}°N, ${lonMin}°-${lonMax}°E)\n`;
-      summaryMsg += `**Period:** ${startDate} to ${endDate}\n\n`;
-      summaryMsg += `**Dimensions:** ${dims.time} time steps, ${dims.lat}×${dims.lon} grid\n`;
-      summaryMsg += `**Dataset ID:** \`${datasetId}\``;
-      addMessage('assistant', summaryMsg);
-
-      // Auto-generate statistics
-      try {
-        const statsResult = await api.analyze(datasetId, 'statistics');
-        let statsMsg = `## Statistics\n\n`;
-        statsMsg += `| Metric | Value |\n|--------|-------|\n`;
-        statsMsg += `| Mean | ${statsResult.mean?.toFixed(2)} |\n`;
-        statsMsg += `| Std Dev | ${statsResult.std?.toFixed(2)} |\n`;
-        statsMsg += `| Min | ${statsResult.min?.toFixed(2)} |\n`;
-        statsMsg += `| Max | ${statsResult.max?.toFixed(2)} |\n`;
-        if (statsResult.percentiles) {
-          const p = statsResult.percentiles;
-          statsMsg += `| Median | ${p.p50?.toFixed(2)} |\n`;
-          statsMsg += `| 5th-95th | ${p.p5?.toFixed(2)} - ${p.p95?.toFixed(2)} |\n`;
+      // Auto-generate statistics for each scenario
+      for (let i = 0; i < loadedIds.length; i++) {
+        try {
+          const statsResult = await api.analyze(loadedIds[i], 'statistics');
+          let statsMsg = `## Statistics — ${labels[i]}\n\n`;
+          statsMsg += `| Metric | Value |\n|--------|-------|\n`;
+          statsMsg += `| Mean | ${statsResult.mean?.toFixed(2)} |\n`;
+          statsMsg += `| Std Dev | ${statsResult.std?.toFixed(2)} |\n`;
+          statsMsg += `| Min | ${statsResult.min?.toFixed(2)} |\n`;
+          statsMsg += `| Max | ${statsResult.max?.toFixed(2)} |\n`;
+          if (statsResult.percentiles) {
+            const p = statsResult.percentiles;
+            statsMsg += `| Median | ${p.p50?.toFixed(2)} |\n`;
+            statsMsg += `| 5th-95th | ${p.p5?.toFixed(2)} - ${p.p95?.toFixed(2)} |\n`;
+          }
+          addMessage('assistant', statsMsg);
+        } catch (err) {
+          console.error(`Failed to get statistics for ${labels[i]}:`, err);
         }
-        addMessage('assistant', statsMsg);
-      } catch (err) {
-        console.error('Failed to get statistics:', err);
       }
 
       // Auto-generate map visualization
-      try {
-        const title = `${selectedVariable} - ${selectedModel} (${selectedScenario})`;
-        const mapResult = await api.visualize(datasetId, 'map', title);
-        if (mapResult.image_base64) {
-          addMessage('assistant', `## Spatial Map`, mapResult.image_base64);
+      if (loadedIds.length >= 2) {
+        // Comparison map for multiple scenarios
+        try {
+          const title = `${selectedVariable} - ${selectedModel} (${labels.join(' vs ')})`;
+          const mapResult = await api.visualize(loadedIds[0], 'map', title, false, loadedIds, labels);
+          if (mapResult.image_base64) {
+            addMessage('assistant', `## Scenario Comparison Map`, mapResult.image_base64);
+          }
+        } catch (err) {
+          console.error('Failed to generate comparison map:', err);
         }
-      } catch (err) {
-        console.error('Failed to generate map:', err);
+      } else {
+        try {
+          const title = `${selectedVariable} - ${selectedModel} (${labels[0]})`;
+          const mapResult = await api.visualize(loadedIds[0], 'map', title);
+          if (mapResult.image_base64) {
+            addMessage('assistant', `## Spatial Map`, mapResult.image_base64);
+          }
+        } catch (err) {
+          console.error('Failed to generate map:', err);
+        }
       }
 
-      // Auto-generate time series
+      // Auto-generate comparison time series (all scenarios overlaid)
       try {
-        const title = `${selectedVariable} Time Series - ${selectedRegion}`;
-        const tsResult = await api.visualize(datasetId, 'timeseries', title, true);
+        const title = `${selectedVariable} Time Series - ${selectedRegion} (${labels.join(', ')})`;
+        const tsResult = await api.visualize(
+          loadedIds[0], 'timeseries', title, true, loadedIds, labels
+        );
         if (tsResult.image_base64) {
-          addMessage('assistant', `## Time Series`, tsResult.image_base64);
+          const heading = loadedIds.length >= 2 ? '## Scenario Comparison Time Series' : '## Time Series';
+          addMessage('assistant', heading, tsResult.image_base64);
         }
       } catch (err) {
         console.error('Failed to generate time series:', err);
@@ -319,12 +353,22 @@ function App() {
     setLoading(true);
     setError(null);
     try {
-      const title = `${selectedVariable} - ${selectedModel} (${selectedScenario})`;
+      const scenarioStr = scenarioLabels.length > 1
+        ? scenarioLabels.join(', ')
+        : scenarioLabels[0] || selectedScenarios[0] || '';
+      const title = `${selectedVariable} - ${selectedModel} (${scenarioStr})`;
+
+      // Use all loaded dataset IDs for multi-scenario comparison
+      const ids = allDatasetIds.length > 0 ? allDatasetIds : [currentDatasetId];
+      const lbls = scenarioLabels.length > 0 ? scenarioLabels : undefined;
+
       const result = await api.visualize(
         currentDatasetId,
         selectedViz,
         title,
-        selectedViz === 'timeseries'
+        selectedViz === 'timeseries',
+        ids.length > 1 ? ids : undefined,
+        ids.length > 1 ? lbls : undefined
       );
 
       if (result.image_base64) {
@@ -480,14 +524,26 @@ function App() {
         </div>
 
         <div className="form-group">
-          <label>Emissions Scenario</label>
-          <select value={selectedScenario} onChange={(e) => setSelectedScenario(e.target.value)}>
+          <label>Emissions Scenarios</label>
+          <div className="checkbox-group">
             {scenarios.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.id} - {s.description.slice(0, 30)}...
-              </option>
+              <label key={s.id} className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={selectedScenarios.includes(s.id)}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      setSelectedScenarios((prev) => [...prev, s.id]);
+                    } else {
+                      setSelectedScenarios((prev) => prev.filter((id) => id !== s.id));
+                    }
+                  }}
+                />
+                <span className="checkbox-text">{s.id}</span>
+                <span className="checkbox-desc">{s.description.slice(0, 25)}</span>
+              </label>
             ))}
-          </select>
+          </div>
         </div>
 
         <div className="divider" />
@@ -581,10 +637,12 @@ function App() {
         <button
           className="btn-primary"
           onClick={handleLoadData}
-          disabled={loading}
+          disabled={loading || selectedScenarios.length === 0}
           style={{ marginTop: '16px' }}
         >
-          {loading ? <span className="spinner" /> : 'Load Data'}
+          {loading ? <span className="spinner" /> : selectedScenarios.length > 1
+            ? `Load Data (${selectedScenarios.length} scenarios)`
+            : 'Load Data'}
         </button>
 
         <div className="divider" />

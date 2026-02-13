@@ -132,11 +132,13 @@ export async function visualize(
   dataset_id: string,
   viz_type: string,
   title?: string,
-  show_trend = false
+  show_trend = false,
+  dataset_ids?: string[],
+  labels?: string[]
 ): Promise<VisualizationResult> {
   return fetchJson(`${API_BASE}/visualize`, {
     method: 'POST',
-    body: JSON.stringify({ dataset_id, viz_type, title, show_trend }),
+    body: JSON.stringify({ dataset_id, dataset_ids, labels, viz_type, title, show_trend }),
   });
 }
 

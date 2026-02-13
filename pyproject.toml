@@ -42,9 +42,14 @@ dependencies = [
     "httpx>=0.25.0",
     "fastapi>=0.109.0",
     "uvicorn>=0.27.0",
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.optional-dependencies]
+azure = [
+    "azure-identity>=1.15.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
@@ -55,7 +60,7 @@ dev = [
 
 [project.scripts]
 rcmes-mcp = "rcmes_mcp.server:main"
-rcmes-gemini = "rcmes_mcp.gemini_client:main"
+rcmes-chat = "rcmes_mcp.azure_client:main"
 rcmes-api = "rcmes_mcp.api:main"
 
 [project.urls]
