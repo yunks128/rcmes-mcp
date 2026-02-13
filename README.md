@@ -51,17 +51,55 @@ rcmes-api &                    # Terminal 1: API on :8502
 cd web && npm run dev          # Terminal 2: React on :5173
 ```
 
-### Running with Gemini API
+### Azure OpenAI Setup (NASA SMCE)
+
+The project uses Azure OpenAI from the NASA SMCE subscription (`smce-azr-ocw`, ID: `50204712-4592-47e2-922c-7ca05b52e930`).
+
+**Step 1: Azure CLI login**
 
 ```bash
-# Set your Gemini API key
-export GEMINI_API_KEY="your-api-key"
+# Install Azure CLI (if not installed)
+curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 
+# Login with SMCE tenant
+az login --use-device-code --tenant smce.nasa.gov
+
+# Verify subscription
+az account show  # should show smce-azr-ocw
+```
+
+**Step 2: Create or use an Azure OpenAI resource**
+
+If you don't have one yet, create via [Azure Portal](https://portal.azure.com) or CLI:
+1. Go to Azure Portal → Create **Azure OpenAI** resource in `smce-azr-ocw` subscription
+2. Deploy a model (e.g., `gpt-4o`) under Model deployments
+3. Go to **Keys and Endpoint** to get credentials
+
+**Step 3: Set environment variables**
+
+```bash
+# Required
+export AZURE_OPENAI_ENDPOINT="https://<your-resource>.openai.azure.com/"
+export AZURE_OPENAI_DEPLOYMENT="gpt-4o"           # must match your deployment name
+
+# Auth — pick one:
+export AZURE_OPENAI_API_KEY="<your-api-key>"       # Option A: API key
+# Or skip API_KEY and use 'az login' above          # Option B: Azure Identity
+
+# Optional
+export AZURE_OPENAI_API_VERSION="2024-10-21"       # default
+```
+
+> **Note:** If `AZURE_OPENAI_API_KEY` is not set, the app will automatically use Azure Identity auth (your `az login` session). This requires `pip install azure-identity`.
+
+### Running with Azure OpenAI
+
+```bash
 # Run interactive chat
-rcmes-gemini
+rcmes-chat
 
 # Or as Python module
-python -m rcmes_mcp.gemini_client
+python -m rcmes_mcp.azure_client
 ```
 
 ### Running as MCP Server (for Claude)
@@ -174,6 +212,10 @@ heatwave days could increase from ~15 to ~85 days.
 ## Configuration
 
 Environment variables:
+- `AZURE_OPENAI_ENDPOINT`: Azure OpenAI resource endpoint URL
+- `AZURE_OPENAI_API_KEY`: Azure OpenAI API key
+- `AZURE_OPENAI_DEPLOYMENT`: Model deployment name (default: `gpt-4o`)
+- `AZURE_OPENAI_API_VERSION`: API version (default: `2024-10-21`)
 - `RCMES_CACHE_DIR`: Directory for result caching (default: system temp)
 - `RCMES_SESSION_TTL`: Session dataset TTL in hours (default: 2)
 - `DASK_SCHEDULER`: Dask scheduler address for distributed computing

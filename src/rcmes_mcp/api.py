@@ -12,8 +12,15 @@ Usage:
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 from pathlib import Path
 from typing import Any
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +34,8 @@ from rcmes_mcp.utils.session import session_manager
 
 # Import RCMES tools
 from rcmes_mcp.tools import analysis, data_access, indices, processing, visualization
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="RCMES Climate API",
@@ -78,7 +87,9 @@ class AnalysisRequest(BaseModel):
 
 
 class VisualizationRequest(BaseModel):
-    dataset_id: str = Field(..., description="Dataset ID")
+    dataset_id: str | None = Field(None, description="Single dataset ID (legacy)")
+    dataset_ids: list[str] | None = Field(None, description="Multiple dataset IDs for comparison")
+    labels: list[str] | None = Field(None, description="Labels for each dataset")
     viz_type: str = Field(..., description="Type: map, timeseries, histogram")
     title: str | None = Field(None, description="Plot title")
     show_trend: bool = Field(False, description="Show trend line (for timeseries)")
@@ -297,20 +308,34 @@ async def visualize(request: VisualizationRequest) -> dict[str, Any]:
     """Generate visualization."""
     viz_type = request.viz_type.lower()
 
+    # Resolve dataset IDs: prefer dataset_ids list, fall back to single dataset_id
+    ids = request.dataset_ids or ([request.dataset_id] if request.dataset_id else [])
+    print(f"[visualize] viz_type={viz_type}, dataset_ids={ids}, labels={request.labels}")
+    if not ids:
+        raise HTTPException(status_code=400, detail="No dataset_id or dataset_ids provided")
+
     if viz_type == "map":
-        result = visualization.generate_map(
-            dataset_id=request.dataset_id,
-            title=request.title,
-        )
+        if len(ids) >= 2:
+            result = visualization.generate_comparison_map(
+                dataset_ids=ids,
+                labels=request.labels,
+                title=request.title,
+            )
+        else:
+            result = visualization.generate_map(
+                dataset_id=ids[0],
+                title=request.title,
+            )
     elif viz_type == "timeseries":
         result = visualization.generate_timeseries_plot(
-            dataset_ids=[request.dataset_id],
+            dataset_ids=ids,
+            labels=request.labels,
             title=request.title,
             show_trend=request.show_trend,
         )
     elif viz_type == "histogram":
         result = visualization.generate_histogram(
-            dataset_id=request.dataset_id,
+            dataset_id=ids[0],
             title=request.title,
         )
     else:
@@ -396,18 +421,283 @@ async def calculate_correlation(request: CorrelationRequest) -> dict[str, Any]:
 # ============================================================================
 
 
-@app.post("/api/chat")
-async def chat(request: ChatRequest) -> dict[str, Any]:
-    """Process a chat message and return AI response with optional actions."""
-    message = request.message.lower()
-    dataset_id = request.dataset_id
+def _get_azure_client():
+    """Get an Azure OpenAI client, or None if not configured.
 
-    # Simple keyword-based responses for demo
-    # In production, this would connect to an LLM
+    Supports API key auth and Azure Identity (az login) auth.
+    Returns None if neither is available, triggering keyword fallback.
+    """
+    endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+    if not endpoint:
+        return None
+
+    try:
+        from openai import AzureOpenAI
+    except ImportError:
+        logger.warning("openai package not installed — falling back to keyword chat")
+        return None
+
+    api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-10-21")
+    api_key = os.environ.get("AZURE_OPENAI_API_KEY")
+
+    if api_key:
+        return AzureOpenAI(
+            azure_endpoint=endpoint,
+            api_key=api_key,
+            api_version=api_version,
+        )
+
+    # Try Azure Identity (az login / managed identity)
+    try:
+        from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+
+        token_provider = get_bearer_token_provider(
+            DefaultAzureCredential(),
+            "https://cognitiveservices.azure.com/.default",
+        )
+        return AzureOpenAI(
+            azure_endpoint=endpoint,
+            azure_ad_token_provider=token_provider,
+            api_version=api_version,
+        )
+    except Exception:
+        logger.warning("Azure Identity auth failed — falling back to keyword chat")
+        return None
+
+
+def _get_chat_tools() -> list[dict]:
+    """OpenAI function-calling tool definitions for the chat endpoint."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate_statistics",
+                "description": "Calculate summary statistics (mean, std, min, max) for a loaded dataset",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string", "description": "Dataset ID"},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate_trend",
+                "description": "Calculate temporal trend with statistical significance",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string", "description": "Dataset ID"},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate_climatology",
+                "description": "Calculate daily/monthly/seasonal climatology",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string", "description": "Dataset ID"},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate_regional_mean",
+                "description": "Calculate area-weighted regional mean time series",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string", "description": "Dataset ID"},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_heatwaves",
+                "description": "Analyze heatwave frequency, duration, and intensity",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string", "description": "Dataset ID (tasmax)"},
+                        "threshold_percentile": {"type": "number", "default": 90},
+                        "min_duration": {"type": "integer", "default": 3},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_map",
+                "description": "Generate a spatial map visualization",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string", "description": "Dataset ID"},
+                        "title": {"type": "string"},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_timeseries_plot",
+                "description": "Generate a time series plot",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_ids": {"type": "array", "items": {"type": "string"}},
+                        "labels": {"type": "array", "items": {"type": "string"}},
+                        "title": {"type": "string"},
+                        "show_trend": {"type": "boolean", "default": False},
+                    },
+                    "required": ["dataset_ids"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_histogram",
+                "description": "Generate a histogram of data distribution",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string", "description": "Dataset ID"},
+                        "title": {"type": "string"},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+    ]
+
+
+# Map tool names to their implementations for the chat endpoint
+_CHAT_TOOL_IMPLS: dict[str, Any] = {
+    "calculate_statistics": analysis.calculate_statistics,
+    "calculate_trend": analysis.calculate_trend,
+    "calculate_climatology": analysis.calculate_climatology,
+    "calculate_regional_mean": analysis.calculate_regional_mean,
+    "analyze_heatwaves": indices.analyze_heatwaves,
+    "generate_map": visualization.generate_map,
+    "generate_timeseries_plot": visualization.generate_timeseries_plot,
+    "generate_histogram": visualization.generate_histogram,
+}
+
+_CHAT_SYSTEM_PROMPT = (
+    "You are a climate research assistant embedded in a web UI. "
+    "The user may have a dataset already loaded (identified by a dataset_id). "
+    "You have access to tools for statistics, trends, heatwave analysis, and visualization. "
+    "When the user asks for analysis or plots, call the appropriate tool with the dataset_id. "
+    "Always explain results in accessible language."
+)
+
+
+async def _azure_chat(message: str, dataset_id: str | None) -> dict[str, Any]:
+    """Handle chat via Azure OpenAI with function calling."""
+    client = _get_azure_client()
+    if client is None:
+        return None  # type: ignore[return-value]
+
+    deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+    tools = _get_chat_tools()
+
+    context = ""
+    if dataset_id:
+        context = f"\n\nThe user currently has dataset '{dataset_id}' loaded."
+
+    messages = [
+        {"role": "system", "content": _CHAT_SYSTEM_PROMPT + context},
+        {"role": "user", "content": message},
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model=deployment,
+            messages=messages,
+            tools=tools,
+        )
+
+        choice = response.choices[0]
+        action_result = None
+
+        # Process tool calls (single round)
+        if choice.finish_reason == "tool_calls":
+            assistant_message = choice.message
+            messages.append(assistant_message)
+
+            for tool_call in assistant_message.tool_calls:
+                tool_name = tool_call.function.name
+                args = json.loads(tool_call.function.arguments)
+                impl = _CHAT_TOOL_IMPLS.get(tool_name)
+                if impl is None:
+                    tool_result = {"error": f"Unknown tool: {tool_name}"}
+                else:
+                    try:
+                        tool_result = impl(**args)
+                    except Exception as e:
+                        tool_result = {"error": str(e)}
+
+                # Capture visualization results for the frontend
+                if tool_result.get("image_base64"):
+                    action_result = {
+                        "image_base64": tool_result["image_base64"],
+                        "message": f"Generated {tool_name.replace('generate_', '')} visualization.",
+                    }
+                elif "error" not in tool_result:
+                    action_result = {
+                        "dataset_id": tool_result.get("dataset_id"),
+                        "message": f"Tool `{tool_name}` completed successfully.",
+                    }
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(tool_result, default=str),
+                    }
+                )
+
+            # Get the follow-up response
+            response = client.chat.completions.create(
+                model=deployment,
+                messages=messages,
+                tools=tools,
+            )
+            choice = response.choices[0]
+
+        response_text = choice.message.content or ""
+        return {"response": response_text, "action_result": action_result}
+
+    except Exception as e:
+        logger.exception("Azure OpenAI chat error")
+        return {"response": f"Error communicating with Azure OpenAI: {e}", "action_result": None}
+
+
+def _keyword_chat(message: str, dataset_id: str | None) -> dict[str, Any]:
+    """Fallback keyword-based chat when Azure OpenAI is not configured."""
+    msg = message.lower()
     response_text = ""
     action_result = None
 
-    # Helper function to safely format numbers
     def fmt(value, decimals=2):
         if value is None:
             return "N/A"
@@ -416,8 +706,7 @@ async def chat(request: ChatRequest) -> dict[str, Any]:
         except (TypeError, ValueError):
             return str(value)
 
-    # Check for analysis requests
-    if any(word in message for word in ["statistics", "stats", "summary"]):
+    if any(word in msg for word in ["statistics", "stats", "summary"]):
         if dataset_id:
             response_text = "I'll calculate the statistics for your current dataset."
             try:
@@ -425,16 +714,22 @@ async def chat(request: ChatRequest) -> dict[str, Any]:
                 if "error" not in result:
                     action_result = {
                         "dataset_id": result.get("dataset_id"),
-                        "message": f"**Statistics:**\n- Mean: {fmt(result.get('mean'))}\n- Std: {fmt(result.get('std'))}\n- Min: {fmt(result.get('min'))}\n- Max: {fmt(result.get('max'))}",
+                        "message": (
+                            f"**Statistics:**\n"
+                            f"- Mean: {fmt(result.get('mean'))}\n"
+                            f"- Std: {fmt(result.get('std'))}\n"
+                            f"- Min: {fmt(result.get('min'))}\n"
+                            f"- Max: {fmt(result.get('max'))}"
+                        ),
                     }
                 else:
-                    response_text = f"Statistics calculation returned an error: {result.get('error', 'Unknown error')}"
+                    response_text = f"Statistics error: {result.get('error')}"
             except Exception as e:
-                response_text = f"I encountered an error calculating statistics: {str(e)}"
+                response_text = f"Error calculating statistics: {e}"
         else:
-            response_text = "Please load a dataset first before requesting statistics. Use the sidebar controls to load climate data."
+            response_text = "Please load a dataset first before requesting statistics."
 
-    elif any(word in message for word in ["trend", "change", "increase", "decrease"]):
+    elif any(word in msg for word in ["trend", "change", "increase", "decrease"]):
         if dataset_id:
             response_text = "I'll analyze the trend in your data."
             try:
@@ -451,35 +746,37 @@ async def chat(request: ChatRequest) -> dict[str, Any]:
                     else:
                         response_text = "Trend analysis completed but no slope value was returned."
                 else:
-                    response_text = f"Trend analysis returned an error: {result.get('error', 'Unknown error')}"
+                    response_text = f"Trend error: {result.get('error')}"
             except Exception as e:
-                response_text = f"I encountered an error analyzing the trend: {str(e)}"
+                response_text = f"Error analyzing trend: {e}"
         else:
             response_text = "Please load a dataset first to analyze trends."
 
-    elif any(word in message for word in ["heatwave", "heat wave", "extreme", "hot"]):
+    elif any(word in msg for word in ["heatwave", "heat wave", "extreme", "hot"]):
         if dataset_id:
             response_text = "I'll perform a heatwave analysis on your data."
             try:
                 result = indices.analyze_heatwaves(dataset_id=dataset_id)
                 if "error" not in result:
                     summary = result.get("summary", {})
-                    hot_days = summary.get('mean_annual_hot_days')
-                    heatwave_freq = summary.get('mean_annual_heatwave_frequency')
-                    hot_days_str = f"{hot_days:.1f}" if hot_days is not None else "N/A"
-                    heatwave_freq_str = f"{heatwave_freq:.1f}" if heatwave_freq is not None else "N/A"
+                    hot_days = summary.get("mean_annual_hot_days")
+                    heatwave_freq = summary.get("mean_annual_heatwave_frequency")
                     action_result = {
                         "dataset_id": result.get("dataset_id"),
-                        "message": f"**Heatwave Analysis:**\n- Hot days per year: {hot_days_str}\n- Heatwave events: {heatwave_freq_str}/year",
+                        "message": (
+                            f"**Heatwave Analysis:**\n"
+                            f"- Hot days per year: {fmt(hot_days, 1)}\n"
+                            f"- Heatwave events: {fmt(heatwave_freq, 1)}/year"
+                        ),
                     }
                 else:
-                    response_text = f"Heatwave analysis returned an error: {result.get('error', 'Unknown error')}"
+                    response_text = f"Heatwave error: {result.get('error')}"
             except Exception as e:
-                response_text = f"I encountered an error with heatwave analysis: {str(e)}"
+                response_text = f"Error with heatwave analysis: {e}"
         else:
-            response_text = "Please load temperature data first (tasmax is recommended for heatwave analysis)."
+            response_text = "Please load temperature data first (tasmax recommended)."
 
-    elif any(word in message for word in ["map", "spatial", "plot map"]):
+    elif any(word in msg for word in ["map", "spatial", "plot map"]):
         if dataset_id:
             response_text = "I'll generate a spatial map for you."
             try:
@@ -490,87 +787,79 @@ async def chat(request: ChatRequest) -> dict[str, Any]:
                         "message": "Here's the spatial map of your data.",
                     }
             except Exception as e:
-                response_text = f"I encountered an error generating the map: {str(e)}"
+                response_text = f"Error generating map: {e}"
         else:
-            response_text = "Please load a dataset first to generate a map visualization."
+            response_text = "Please load a dataset first to generate a map."
 
-    elif any(word in message for word in ["timeseries", "time series", "temporal", "over time"]):
+    elif any(word in msg for word in ["timeseries", "time series", "temporal", "over time"]):
         if dataset_id:
             response_text = "I'll generate a time series plot for you."
             try:
                 result = visualization.generate_timeseries_plot(
-                    dataset_ids=[dataset_id],
-                    title="Climate Time Series",
-                    show_trend=True,
+                    dataset_ids=[dataset_id], title="Climate Time Series", show_trend=True
                 )
                 if "error" not in result and result.get("image_base64"):
                     action_result = {
                         "image_base64": result["image_base64"],
-                        "message": "Here's the time series plot showing how the data changes over time.",
+                        "message": "Here's the time series plot.",
                     }
             except Exception as e:
-                response_text = f"I encountered an error generating the time series: {str(e)}"
+                response_text = f"Error generating time series: {e}"
         else:
             response_text = "Please load a dataset first to generate a time series plot."
 
-    elif any(word in message for word in ["compare", "scenario", "ssp"]):
+    elif any(word in msg for word in ["compare", "scenario", "ssp"]):
         response_text = (
             "To compare different scenarios:\n"
-            "1. Load data for each scenario you want to compare (e.g., SSP2-4.5 and SSP5-8.5)\n"
+            "1. Load data for each scenario you want to compare\n"
             "2. Use the visualization tools to overlay them\n"
             "3. Run trend analysis on each to quantify differences\n\n"
-            "SSP scenarios represent different emission pathways:\n"
+            "SSP scenarios:\n"
             "- **SSP1-2.6**: Sustainable development, low emissions\n"
             "- **SSP2-4.5**: Middle of the road\n"
             "- **SSP3-7.0**: Regional rivalry, high emissions\n"
             "- **SSP5-8.5**: Fossil-fuel intensive, very high emissions"
         )
 
-    elif any(word in message for word in ["help", "what can", "how do"]):
+    elif any(word in msg for word in ["help", "what can", "how do"]):
         response_text = (
-            "I can help you with climate data analysis! Here's what I can do:\n\n"
-            "**Data Analysis:**\n"
-            "- Calculate statistics (mean, std, percentiles)\n"
-            "- Analyze temperature trends\n"
-            "- Detect heatwaves and extreme events\n\n"
-            "**Visualizations:**\n"
-            "- Generate spatial maps\n"
-            "- Create time series plots\n"
-            "- Compare different scenarios\n\n"
-            "**To get started:**\n"
-            "1. Use the sidebar to select model, variable, and region\n"
-            "2. Click 'Load Data' to fetch the climate data\n"
-            "3. Ask me questions or request analyses!"
+            "I can help you with climate data analysis!\n\n"
+            "**Data Analysis:** statistics, trends, heatwaves\n"
+            "**Visualizations:** maps, time series, histograms\n\n"
+            "Load data using the sidebar, then ask me questions!"
         )
 
-    elif any(word in message for word in ["hello", "hi", "hey"]):
+    elif any(word in msg for word in ["hello", "hi", "hey"]):
         response_text = (
-            "Hello! I'm your climate data assistant. I can help you:\n"
-            "- Analyze climate model projections\n"
-            "- Calculate statistics and trends\n"
-            "- Generate visualizations\n"
-            "- Understand climate scenarios\n\n"
+            "Hello! I'm your climate data assistant. "
             "Load some data using the sidebar controls, then ask me anything!"
         )
 
     else:
         if dataset_id:
             response_text = (
-                "I can help you analyze your loaded dataset. Try asking me to:\n"
-                "- Show statistics\n"
-                "- Analyze the trend\n"
-                "- Generate a map\n"
-                "- Create a time series plot\n"
-                "- Detect heatwaves (for temperature data)"
+                "Try asking me to: show statistics, analyze the trend, "
+                "generate a map, create a time series plot, or detect heatwaves."
             )
         else:
             response_text = (
-                "To get started, please load some climate data using the controls in the sidebar. "
-                "Select a model, variable, region, and time period, then click 'Load Data'. "
-                "Once loaded, I can help you analyze and visualize the data!"
+                "Please load climate data using the sidebar controls first, "
+                "then I can help you analyze and visualize it!"
             )
 
     return {"response": response_text, "action_result": action_result}
+
+
+@app.post("/api/chat")
+async def chat(request: ChatRequest) -> dict[str, Any]:
+    """Process a chat message using Azure OpenAI (with keyword fallback)."""
+    # Try Azure OpenAI first
+    result = await _azure_chat(request.message, request.dataset_id)
+    if result is not None:
+        return result
+
+    # Fall back to keyword-based responses
+    return _keyword_chat(request.message, request.dataset_id)
 
 
 # ============================================================================
