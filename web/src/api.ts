@@ -134,11 +134,12 @@ export async function visualize(
   title?: string,
   show_trend = false,
   dataset_ids?: string[],
-  labels?: string[]
+  labels?: string[],
+  country_name?: string
 ): Promise<VisualizationResult> {
   return fetchJson(`${API_BASE}/visualize`, {
     method: 'POST',
-    body: JSON.stringify({ dataset_id, dataset_ids, labels, viz_type, title, show_trend }),
+    body: JSON.stringify({ dataset_id, dataset_ids, labels, viz_type, title, show_trend, country_name }),
   });
 }
 
@@ -201,6 +202,33 @@ export async function downloadDataset(
   a.click();
   window.URL.revokeObjectURL(url);
   document.body.removeChild(a);
+}
+
+// Country masking
+export async function listCountries(): Promise<{ countries: string[]; count: number }> {
+  return fetchJson(`${API_BASE}/countries`);
+}
+
+export async function maskByCountry(
+  dataset_id: string,
+  country_name: string
+): Promise<{ success: boolean; dataset_id: string; country: string }> {
+  return fetchJson(`${API_BASE}/mask-by-country`, {
+    method: 'POST',
+    body: JSON.stringify({ dataset_id, country_name }),
+  });
+}
+
+// Batch ETCCDI
+export async function calculateBatchETCCDI(
+  dataset_id: string,
+  indices: string[],
+  freq = 'YS'
+): Promise<{ success: boolean; computed_indices: Record<string, string>; errors?: Record<string, string> }> {
+  return fetchJson(`${API_BASE}/batch-etccdi`, {
+    method: 'POST',
+    body: JSON.stringify({ dataset_id, indices, freq }),
+  });
 }
 
 // Correlation between two datasets

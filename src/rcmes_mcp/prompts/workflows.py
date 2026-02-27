@@ -274,6 +274,109 @@ calculate_trend(dataset_id="ds_regional_mean")
 
 
 @mcp.prompt()
+def extreme_event_statistics() -> str:
+    """
+    Prompt template for ARSET Part 2 - Extreme Event Statistics workflow.
+
+    Computes ETCCDI indices from NEX-GDDP-CMIP6 data, masks to country
+    boundaries, and analyzes trends over the 21st century.
+    """
+    return """
+# Extreme Event Statistics Workflow (ARSET Part 2)
+
+Analyze extreme climate events using ETCCDI indices from NEX-GDDP-CMIP6 data,
+masked to a country/region of interest.
+
+## Step 1: Load Daily Climate Data
+```
+# Load daily maximum temperature for a region covering your country
+load_climate_data(
+    variable="tasmax",
+    model="ACCESS-CM2",
+    scenario="ssp585",
+    start_date="2015-01-01",
+    end_date="2100-12-31",
+    lat_min=5, lat_max=21,    # e.g. Thailand
+    lon_min=97, lon_max=106
+)
+
+# Also load daily minimum temperature and precipitation if needed
+load_climate_data(variable="tasmin", ...)
+load_climate_data(variable="pr", ...)
+```
+
+## Step 2: Calculate ETCCDI Indices (Batch)
+```
+# Temperature extremes
+calculate_batch_etccdi(
+    dataset_id="ds_tasmax",
+    indices=["TXx", "TX90p", "SU", "WSDI"],
+    freq="YS"
+)
+
+# Precipitation extremes
+calculate_batch_etccdi(
+    dataset_id="ds_pr",
+    indices=["Rx1day", "Rx5day", "R10mm", "CDD"],
+    freq="YS"
+)
+```
+
+## Step 3: Mask to Country
+```
+# Mask each index to country boundaries
+mask_by_country(dataset_id="ds_txx", country_name="Thailand")
+mask_by_country(dataset_id="ds_rx1day", country_name="Thailand")
+# Use list_countries() to see available country names
+```
+
+## Step 4: Compute Multi-Year Mean Climatology
+```
+# Calculate the mean over a reference period
+calculate_climatology(dataset_id="ds_txx_masked", period="monthly")
+
+# Or compute statistics over the full period
+calculate_statistics(dataset_id="ds_txx_masked")
+```
+
+## Step 5: Calculate Area-Weighted Regional Annual Time Series
+```
+calculate_regional_mean(dataset_id="ds_txx_masked", area_weighted=True)
+```
+
+## Step 6: Fit Linear Trend
+```
+# Trend is automatically detected as annual data and gives correct per-decade slope
+calculate_trend(dataset_id="ds_txx_regional_mean")
+```
+
+## Step 7: Visualize
+```
+# Map of mean extreme index over the country
+generate_country_map(
+    dataset_id="ds_txx_masked",
+    country_name="Thailand",
+    title="Mean Annual TXx - Thailand (SSP5-8.5)"
+)
+
+# Time series with trend
+generate_timeseries_plot(
+    dataset_ids=["ds_txx_regional_mean"],
+    title="Annual Maximum Temperature (TXx) - Thailand",
+    show_trend=True
+)
+```
+
+## Interpretation
+- Compare historical vs future periods to quantify changes
+- Compare SSP2-4.5 vs SSP5-8.5 for scenario uncertainty
+- Compare multiple models for model uncertainty
+- Look for acceleration of extremes in later periods (2050-2100)
+- Note: ETCCDI indices computed at annual frequency are ideal for trend analysis
+"""
+
+
+@mcp.prompt()
 def multi_model_comparison() -> str:
     """
     Prompt template for comparing multiple climate models.

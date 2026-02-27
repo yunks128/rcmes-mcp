@@ -63,6 +63,61 @@ def list_climate_indices() -> dict:
 
 
 @mcp.tool()
+def calculate_batch_etccdi(
+    dataset_id: str,
+    indices: list[str],
+    freq: str = "YS",
+) -> dict:
+    """
+    Calculate multiple ETCCDI climate extreme indices in one call.
+
+    Args:
+        dataset_id: ID of the dataset (must be daily temperature or precipitation)
+        indices: List of index names (e.g. ["TXx", "TX90p", "SU"])
+        freq: Output frequency - "YS" (annual), "QS-DEC" (seasonal), "MS" (monthly)
+
+    Returns:
+        Dictionary mapping index names to their new dataset_ids
+
+    Examples:
+        # Calculate all temperature extremes
+        calculate_batch_etccdi(dataset_id="ds_abc", indices=["TXx", "TXn", "SU", "FD"], freq="YS")
+
+        # Calculate precipitation extremes
+        calculate_batch_etccdi(dataset_id="ds_abc", indices=["Rx1day", "Rx5day", "CDD", "R10mm"])
+    """
+    if not indices:
+        return {"error": "No indices specified. Provide a list of index names."}
+
+    results = {}
+    errors = {}
+
+    for index_name in indices:
+        result = calculate_etccdi_index(
+            dataset_id=dataset_id,
+            index=index_name,
+            freq=freq,
+        )
+        if "error" in result:
+            errors[index_name] = result["error"]
+        else:
+            results[index_name] = result["dataset_id"]
+
+    response = {
+        "success": len(results) > 0,
+        "original_dataset_id": dataset_id,
+        "frequency": freq,
+        "computed_indices": results,
+        "indices_count": len(results),
+    }
+
+    if errors:
+        response["errors"] = errors
+
+    return response
+
+
+@mcp.tool()
 def calculate_etccdi_index(
     dataset_id: str,
     index: str,

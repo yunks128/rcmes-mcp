@@ -197,6 +197,111 @@ class TestIndicesTools:
         assert "Rx1day" in result["precipitation_indices"]
 
 
+class TestCountryMasking:
+    """Test country masking tools."""
+
+    def test_list_countries(self):
+        """Test listing available countries."""
+        from rcmes_mcp.tools.processing import list_countries
+
+        result = list_countries()
+        assert "countries" in result
+        assert len(result["countries"]) > 0
+        assert result["count"] > 100  # Should have 100+ countries
+
+    def test_mask_by_country(self, stored_dataset):
+        """Test masking dataset to a country boundary."""
+        from rcmes_mcp.tools.processing import mask_by_country
+
+        # California-ish data should overlap with US
+        result = mask_by_country(stored_dataset, "United States of America")
+        assert result["success"] is True
+        assert "dataset_id" in result
+        assert result["country"] == "United States of America"
+
+        # Verify masked data has some NaN (edges outside US)
+        masked_ds = session_manager.get(result["dataset_id"])
+        assert np.isnan(masked_ds["tasmax"].values).any()
+
+    def test_mask_by_country_not_found(self, stored_dataset):
+        """Test masking with nonexistent country."""
+        from rcmes_mcp.tools.processing import mask_by_country
+
+        result = mask_by_country(stored_dataset, "Atlantis")
+        assert "error" in result
+
+    def test_mask_by_country_case_insensitive(self, stored_dataset):
+        """Test that country matching is case-insensitive."""
+        from rcmes_mcp.tools.processing import mask_by_country
+
+        result = mask_by_country(stored_dataset, "united states of america")
+        assert result["success"] is True
+
+
+class TestBatchETCCDI:
+    """Test batch ETCCDI calculation."""
+
+    def test_calculate_batch_etccdi_import(self):
+        """Test that calculate_batch_etccdi can be imported."""
+        from rcmes_mcp.tools.indices import calculate_batch_etccdi
+
+        assert callable(calculate_batch_etccdi)
+
+    def test_calculate_batch_etccdi_empty(self, stored_dataset):
+        """Test batch ETCCDI with empty indices list."""
+        from rcmes_mcp.tools.indices import calculate_batch_etccdi
+
+        result = calculate_batch_etccdi(stored_dataset, [])
+        assert "error" in result
+
+
+class TestTrendFrequency:
+    """Test calculate_trend frequency detection."""
+
+    def test_trend_annual_data(self):
+        """Test that trend correctly detects annual data."""
+        from rcmes_mcp.tools.analysis import calculate_trend
+
+        # Create annual time series data
+        years = np.arange("2020", "2050", dtype="datetime64[Y]")
+        lats = np.linspace(35, 40, 5)
+        lons = np.linspace(-120, -115, 5)
+
+        # Linear trend: 0.1 units per year = 1.0 units per decade
+        trend_per_year = 0.1
+        data = np.zeros((len(years), len(lats), len(lons)))
+        for i in range(len(years)):
+            data[i, :, :] = 280 + trend_per_year * i
+
+        ds = xr.Dataset(
+            {
+                "tas": (["time", "lat", "lon"], data, {"units": "K"}),
+            },
+            coords={
+                "time": years.astype("datetime64[ns]"),
+                "lat": lats,
+                "lon": lons,
+            },
+        )
+
+        dataset_id = session_manager.store(
+            data=ds, source="test", variable="tas", model="TEST", scenario="test",
+        )
+
+        result = calculate_trend(dataset_id)
+        assert "trend" in result
+        # For annual data with 0.1/year trend, slope_per_decade should be ~1.0
+        assert abs(result["trend"]["slope_per_decade"] - 1.0) < 0.01
+
+    def test_trend_daily_data(self, stored_dataset):
+        """Test that trend works with daily data."""
+        from rcmes_mcp.tools.analysis import calculate_trend
+
+        result = calculate_trend(stored_dataset)
+        assert "trend" in result
+        assert "slope_per_decade" in result["trend"]
+
+
 class TestVisualizationTools:
     """Test visualization tools."""
 
