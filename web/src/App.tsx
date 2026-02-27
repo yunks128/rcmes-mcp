@@ -59,6 +59,14 @@ function App() {
   const [secondDatasetId, setSecondDatasetId] = useState<string | null>(null);
   const [correlationType, setCorrelationType] = useState<'temporal' | 'spatial'>('temporal');
 
+  // Country masking state
+  const [countries, setCountries] = useState<string[]>([]);
+  const [selectedCountry, setSelectedCountry] = useState<string>('');
+
+  // ETCCDI state
+  const [selectedETCCDIIndices, setSelectedETCCDIIndices] = useState<string[]>([]);
+  const [etccdiResults, setEtccdiResults] = useState<Record<string, string>>({});
+
   // Download state
   const [downloadFormat, setDownloadFormat] = useState<'netcdf' | 'csv'>('netcdf');
   const [downloading, setDownloading] = useState(false);
@@ -73,14 +81,16 @@ function App() {
   useEffect(() => {
     async function loadMetadata() {
       try {
-        const [modelsRes, varsRes, scenariosRes] = await Promise.all([
+        const [modelsRes, varsRes, scenariosRes, countriesRes] = await Promise.all([
           api.listModels(),
           api.listVariables(),
           api.listScenarios(),
+          api.listCountries().catch(() => ({ countries: [], count: 0 })),
         ]);
         setModels(modelsRes.models?.slice(0, 15) || []);
         setVariables(varsRes.variables || []);
         setScenarios(scenariosRes.scenarios || []);
+        setCountries(countriesRes.countries || []);
       } catch (err) {
         console.error('Failed to load metadata:', err);
       }
@@ -368,7 +378,8 @@ function App() {
         title,
         selectedViz === 'timeseries',
         ids.length > 1 ? ids : undefined,
-        ids.length > 1 ? lbls : undefined
+        ids.length > 1 ? lbls : undefined,
+        selectedViz === 'country_map' ? selectedCountry || undefined : undefined
       );
 
       if (result.image_base64) {
@@ -735,6 +746,139 @@ function App() {
 
         <div className="divider" />
 
+        <h2>Country Masking</h2>
+
+        <div className="form-group">
+          <label>Country</label>
+          <select value={selectedCountry} onChange={(e) => setSelectedCountry(e.target.value)}>
+            <option value="">Select country...</option>
+            {countries.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </div>
+
+        <button
+          className="btn-secondary"
+          onClick={async () => {
+            if (!currentDatasetId || !selectedCountry) {
+              setError('Please load data and select a country');
+              return;
+            }
+            setLoading(true);
+            setError(null);
+            try {
+              const result = await api.maskByCountry(currentDatasetId, selectedCountry);
+              setCurrentDatasetId(result.dataset_id);
+              await refreshDatasets();
+              addMessage('assistant', `Masked dataset to **${selectedCountry}**. New dataset ID: \`${result.dataset_id}\``);
+            } catch (err) {
+              const errMsg = err instanceof Error ? err.message : 'Masking failed';
+              setError(errMsg);
+              addMessage('assistant', `Error: ${errMsg}`);
+            } finally {
+              setLoading(false);
+            }
+          }}
+          disabled={loading || !currentDatasetId || !selectedCountry}
+          style={{ width: '100%' }}
+        >
+          Mask to Country
+        </button>
+
+        <div className="divider" />
+
+        <h2>ETCCDI Indices</h2>
+
+        <div className="form-group">
+          <label>Select Indices</label>
+          <div className="checkbox-group">
+            {([
+              ['TXx', 'Max daily max temp'],
+              ['TX90p', 'Warm days (>90th pctl)'],
+              ['SU', 'Summer days (>25\u00B0C)'],
+              ['FD', 'Frost days (<0\u00B0C)'],
+              ['Rx1day', 'Max 1-day precip'],
+              ['Rx5day', 'Max 5-day precip'],
+              ['CDD', 'Consecutive dry days'],
+              ['R10mm', 'Heavy precip days (\u226510mm)'],
+            ] as [string, string][]).map(([idx, desc]) => (
+              <label key={idx} className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={selectedETCCDIIndices.includes(idx)}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      setSelectedETCCDIIndices((prev) => [...prev, idx]);
+                    } else {
+                      setSelectedETCCDIIndices((prev) => prev.filter((i) => i !== idx));
+                    }
+                  }}
+                />
+                <span className="checkbox-text">{idx}</span>
+                <span className="checkbox-desc">{desc}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <button
+          className="btn-secondary"
+          onClick={async () => {
+            if (!currentDatasetId || selectedETCCDIIndices.length === 0) {
+              setError('Please load data and select at least one index');
+              return;
+            }
+            setLoading(true);
+            setError(null);
+            try {
+              const result = await api.calculateBatchETCCDI(currentDatasetId, selectedETCCDIIndices);
+              setEtccdiResults(result.computed_indices || {});
+              await refreshDatasets();
+              let msg = `## ETCCDI Indices Computed\n\n`;
+              msg += `| Index | Dataset ID |\n|-------|------------|\n`;
+              for (const [idx, dsId] of Object.entries(result.computed_indices || {})) {
+                msg += `| ${idx} | \`${dsId}\` |\n`;
+              }
+              if (result.errors) {
+                msg += `\n**Errors:**\n`;
+                for (const [idx, err] of Object.entries(result.errors)) {
+                  msg += `- ${idx}: ${err}\n`;
+                }
+              }
+              addMessage('assistant', msg);
+            } catch (err) {
+              const errMsg = err instanceof Error ? err.message : 'ETCCDI calculation failed';
+              setError(errMsg);
+              addMessage('assistant', `Error: ${errMsg}`);
+            } finally {
+              setLoading(false);
+            }
+          }}
+          disabled={loading || !currentDatasetId || selectedETCCDIIndices.length === 0}
+          style={{ width: '100%' }}
+        >
+          Calculate Indices
+        </button>
+
+        {Object.keys(etccdiResults).length > 0 && (
+          <div className="form-group" style={{ marginTop: '8px' }}>
+            <label>Computed Indices</label>
+            {Object.entries(etccdiResults).map(([idx, dsId]) => (
+              <div
+                key={idx}
+                className="dataset-item"
+                style={{ cursor: 'pointer', padding: '4px 8px', fontSize: '12px' }}
+                onClick={() => setCurrentDatasetId(dsId)}
+              >
+                <strong>{idx}</strong>: <code>{dsId}</code>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="divider" />
+
         <h2>Visualization</h2>
 
         <div className="form-group">
@@ -743,6 +887,7 @@ function App() {
             <option value="map">Map</option>
             <option value="timeseries">Time Series</option>
             <option value="histogram">Histogram</option>
+            <option value="country_map">Country Map</option>
           </select>
         </div>
 

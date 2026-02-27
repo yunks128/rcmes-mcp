@@ -90,9 +90,10 @@ class VisualizationRequest(BaseModel):
     dataset_id: str | None = Field(None, description="Single dataset ID (legacy)")
     dataset_ids: list[str] | None = Field(None, description="Multiple dataset IDs for comparison")
     labels: list[str] | None = Field(None, description="Labels for each dataset")
-    viz_type: str = Field(..., description="Type: map, timeseries, histogram")
+    viz_type: str = Field(..., description="Type: map, timeseries, histogram, country_map")
     title: str | None = Field(None, description="Plot title")
     show_trend: bool = Field(False, description="Show trend line (for timeseries)")
+    country_name: str | None = Field(None, description="Country name for country_map visualization")
 
 
 class SubsetRequest(BaseModel):
@@ -133,6 +134,24 @@ class CorrelationRequest(BaseModel):
     dataset1_id: str = Field(..., description="First dataset ID")
     dataset2_id: str = Field(..., description="Second dataset ID")
     correlation_type: str = Field("temporal", description="'temporal' or 'spatial'")
+
+
+class MaskByCountryRequest(BaseModel):
+    dataset_id: str = Field(..., description="Dataset ID to mask")
+    country_name: str = Field(..., description="Country name (e.g., 'Thailand')")
+
+
+class BatchETCCDIRequest(BaseModel):
+    dataset_id: str = Field(..., description="Dataset ID (daily temperature or precipitation)")
+    indices: list[str] = Field(..., description="List of ETCCDI index names (e.g., ['TXx', 'SU'])")
+    freq: str = Field("YS", description="Output frequency: YS (annual), QS-DEC (seasonal), MS (monthly)")
+
+
+class CountryMapRequest(BaseModel):
+    dataset_id: str = Field(..., description="Dataset ID to visualize")
+    country_name: str | None = Field(None, description="Country to highlight")
+    title: str | None = Field(None, description="Plot title")
+    colormap: str = Field("viridis", description="Matplotlib colormap name")
 
 
 class ChatRequest(BaseModel):
@@ -251,6 +270,40 @@ async def convert_units(request: ConvertUnitsRequest) -> dict[str, Any]:
     return result
 
 
+@app.get("/api/countries")
+async def list_countries() -> dict[str, Any]:
+    """List available country names for masking."""
+    result = processing.list_countries()
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.post("/api/mask-by-country")
+async def mask_by_country(request: MaskByCountryRequest) -> dict[str, Any]:
+    """Mask a dataset to a country's boundaries."""
+    result = processing.mask_by_country(
+        dataset_id=request.dataset_id,
+        country_name=request.country_name,
+    )
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.post("/api/batch-etccdi")
+async def batch_etccdi(request: BatchETCCDIRequest) -> dict[str, Any]:
+    """Calculate multiple ETCCDI climate extreme indices."""
+    result = indices.calculate_batch_etccdi(
+        dataset_id=request.dataset_id,
+        indices=request.indices,
+        freq=request.freq,
+    )
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
 # ============================================================================
 # Analysis Endpoints
 # ============================================================================
@@ -288,10 +341,8 @@ async def calculate_etccdi(request: ETCCDIRequest) -> dict[str, Any]:
     """Calculate ETCCDI climate extreme index."""
     result = indices.calculate_etccdi_index(
         dataset_id=request.dataset_id,
-        index_name=request.index_name,
+        index=request.index_name,
         threshold=request.threshold,
-        base_period_start=request.base_period_start,
-        base_period_end=request.base_period_end,
     )
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -338,10 +389,17 @@ async def visualize(request: VisualizationRequest) -> dict[str, Any]:
             dataset_id=ids[0],
             title=request.title,
         )
+    elif viz_type == "country_map":
+        result = visualization.generate_country_map(
+            dataset_id=ids[0],
+            country_name=request.country_name,
+            title=request.title,
+            colormap="viridis",
+        )
     else:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown visualization type: {viz_type}. Valid types: map, timeseries, histogram",
+            detail=f"Unknown visualization type: {viz_type}. Valid types: map, timeseries, histogram, country_map",
         )
 
     if "error" in result:
@@ -587,6 +645,68 @@ def _get_chat_tools() -> list[dict]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "mask_by_country",
+                "description": "Mask a dataset to a country's boundaries (e.g., Thailand, Brazil)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string", "description": "Dataset ID"},
+                        "country_name": {"type": "string", "description": "Country name"},
+                    },
+                    "required": ["dataset_id", "country_name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_countries",
+                "description": "List available country names for masking",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate_batch_etccdi",
+                "description": "Calculate multiple ETCCDI climate extreme indices at once",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string", "description": "Dataset ID"},
+                        "indices": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of index names (e.g., ['TXx', 'SU', 'FD'])",
+                        },
+                        "freq": {"type": "string", "default": "YS"},
+                    },
+                    "required": ["dataset_id", "indices"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_country_map",
+                "description": "Generate a map with country boundaries highlighted",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string", "description": "Dataset ID"},
+                        "country_name": {"type": "string", "description": "Country to highlight"},
+                        "title": {"type": "string"},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
     ]
 
 
@@ -600,6 +720,10 @@ _CHAT_TOOL_IMPLS: dict[str, Any] = {
     "generate_map": visualization.generate_map,
     "generate_timeseries_plot": visualization.generate_timeseries_plot,
     "generate_histogram": visualization.generate_histogram,
+    "mask_by_country": processing.mask_by_country,
+    "list_countries": processing.list_countries,
+    "calculate_batch_etccdi": indices.calculate_batch_etccdi,
+    "generate_country_map": visualization.generate_country_map,
 }
 
 _CHAT_SYSTEM_PROMPT = (

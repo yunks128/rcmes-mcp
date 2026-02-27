@@ -327,6 +327,14 @@ def load_climate_data(
     lon_min_360 = lon_min if lon_min >= 0 else 360 + lon_min
     lon_max_360 = lon_max if lon_max >= 0 else 360 + lon_max
 
+    # Handle wrap-around: if lon_min_360 >= lon_max_360 the range spans the
+    # 0/360 boundary (e.g. global -180..180 → 180..180, or cross-meridian).
+    # In that case skip longitude subsetting and select the full range.
+    if lon_min_360 >= lon_max_360:
+        lon_bounds_arg = None  # full longitude
+    else:
+        lon_bounds_arg = (lon_min_360, lon_max_360)
+
     # Check cache first
     cache_key = _get_subset_cache_key(
         variable, model, scenario, start_date, end_date,
@@ -347,7 +355,7 @@ def load_climate_data(
                 start_year=start_year,
                 end_year=end_year,
                 lat_bounds=(lat_min, lat_max),
-                lon_bounds=(lon_min_360, lon_max_360),
+                lon_bounds=lon_bounds_arg,
             )
 
             # Subset by time

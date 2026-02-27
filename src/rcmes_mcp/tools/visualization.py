@@ -530,6 +530,162 @@ def generate_taylor_diagram(
 
 
 @mcp.tool()
+def generate_country_map(
+    dataset_id: str,
+    country_name: str | None = None,
+    time_index: int | str | None = None,
+    title: str | None = None,
+    colormap: str = "viridis",
+    vmin: float | None = None,
+    vmax: float | None = None,
+) -> dict:
+    """
+    Generate a map visualization with country boundaries highlighted.
+
+    Useful for plotting ETCCDI index maps masked to a specific country.
+
+    Args:
+        dataset_id: ID of the dataset to visualize
+        country_name: Country to highlight with bold boundary (optional)
+        time_index: Time index (integer) or date string to plot. If None, plots temporal mean.
+        title: Plot title (auto-generated if not provided)
+        colormap: Matplotlib colormap name
+        vmin: Minimum value for color scale
+        vmax: Maximum value for color scale
+
+    Returns:
+        Dictionary with base64-encoded image and file path
+    """
+    try:
+        ds = session_manager.get(dataset_id)
+        metadata = session_manager.get_metadata(dataset_id)
+    except KeyError as e:
+        return {"error": str(e)}
+
+    try:
+        import matplotlib.pyplot as plt
+
+        try:
+            import cartopy.crs as ccrs
+            import cartopy.feature as cfeature
+        except ImportError:
+            return {"error": "cartopy is required for generate_country_map. Install with: pip install cartopy"}
+
+        # Get data to plot
+        if isinstance(ds, xr.DataArray):
+            data = ds
+        else:
+            var_name = metadata.variable or list(ds.data_vars)[0]
+            data = ds[var_name]
+
+        # Handle time dimension
+        if "time" in data.dims:
+            if time_index is None:
+                plot_data = data.mean(dim="time").compute()
+                time_label = "Temporal Mean"
+            elif isinstance(time_index, int):
+                plot_data = data.isel(time=time_index).compute()
+                time_label = str(data.time.values[time_index])[:10]
+            else:
+                plot_data = data.sel(time=time_index, method="nearest").compute()
+                time_label = time_index
+        else:
+            plot_data = data.compute()
+            time_label = ""
+
+        # Create figure with cartopy
+        fig, ax = plt.subplots(
+            figsize=(12, 8),
+            subplot_kw={"projection": ccrs.PlateCarree()},
+        )
+
+        # Add base features
+        ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
+        ax.add_feature(cfeature.BORDERS, linewidth=0.3, linestyle="--")
+
+        # Plot data
+        im = ax.pcolormesh(
+            plot_data.lon,
+            plot_data.lat,
+            plot_data.values,
+            transform=ccrs.PlateCarree(),
+            cmap=colormap,
+            vmin=vmin,
+            vmax=vmax,
+        )
+
+        # Highlight country boundary if specified
+        if country_name:
+            try:
+                from rcmes_mcp.tools.processing import _get_country_boundaries
+
+                gdf = _get_country_boundaries()
+                country_row = None
+                for col in ["NAME", "name", "ADMIN", "admin"]:
+                    if col in gdf.columns:
+                        matches = gdf[gdf[col].str.lower() == country_name.lower()]
+                        if len(matches) > 0:
+                            country_row = matches.iloc[0]
+                            break
+
+                if country_row is not None:
+                    from shapely.geometry import mapping
+                    from matplotlib.patches import PathPatch
+                    from matplotlib.path import Path as MplPath
+                    import cartopy.feature as cfeature_shape
+                    from cartopy.feature import ShapelyFeature
+
+                    feature = ShapelyFeature(
+                        [country_row.geometry],
+                        ccrs.PlateCarree(),
+                        facecolor="none",
+                        edgecolor="black",
+                        linewidth=2.5,
+                    )
+                    ax.add_feature(feature)
+            except Exception:
+                pass  # Non-critical: skip country highlight if it fails
+
+        # Set extent based on data
+        ax.set_extent([
+            float(plot_data.lon.min()),
+            float(plot_data.lon.max()),
+            float(plot_data.lat.min()),
+            float(plot_data.lat.max()),
+        ])
+
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
+        cbar.set_label(data.attrs.get("units", metadata.variable or ""))
+
+        # Set title
+        if title:
+            ax.set_title(title)
+        else:
+            model_str = f" ({metadata.model})" if metadata.model else ""
+            country_str = f" - {country_name}" if country_name else ""
+            ax.set_title(f"{metadata.variable}{model_str}{country_str}\n{time_label}")
+
+        # Save and encode
+        filename = f"country_map_{dataset_id}.png"
+        filepath = _save_fig(fig, filename)
+        img_base64 = _fig_to_base64(fig)
+        plt.close(fig)
+
+        return {
+            "success": True,
+            "image_base64": img_base64,
+            "file_path": filepath,
+            "dataset_id": dataset_id,
+            "country": country_name,
+            "time": time_label,
+        }
+
+    except Exception as e:
+        return {"error": f"Failed to generate country map: {str(e)}"}
+
+
+@mcp.tool()
 def generate_histogram(
     dataset_id: str,
     bins: int = 50,

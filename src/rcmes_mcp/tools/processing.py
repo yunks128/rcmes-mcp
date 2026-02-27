@@ -2,16 +2,56 @@
 Data Processing Tools
 
 MCP tools for processing climate data including temporal/spatial
-subsetting, regridding, and unit conversions.
+subsetting, regridding, unit conversions, and country masking.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import numpy as np
 import xarray as xr
 
 from rcmes_mcp.server import mcp
 from rcmes_mcp.utils.session import session_manager
+
+# Module-level cache for country polygons
+_country_polygons_gdf = None
+_NATURALEARTH_URL = "https://naturalearth.s3.amazonaws.com/110m_cultural/ne_110m_admin_0_countries.zip"
+_SHAPEFILE_CACHE_DIR = Path.home() / ".cache" / "rcmes_mcp" / "shapefiles"
+
+
+def _get_country_boundaries():
+    """Load Natural Earth country boundaries, caching the GeoDataFrame."""
+    global _country_polygons_gdf
+    if _country_polygons_gdf is not None:
+        return _country_polygons_gdf
+
+    import geopandas as gpd
+
+    # Try built-in low-res first (available in geopandas < 1.0)
+    try:
+        _country_polygons_gdf = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))
+        return _country_polygons_gdf
+    except Exception:
+        pass
+
+    # Try cached shapefile
+    cached = _SHAPEFILE_CACHE_DIR / "ne_110m_admin_0_countries.shp"
+    if cached.exists():
+        _country_polygons_gdf = gpd.read_file(cached)
+        return _country_polygons_gdf
+
+    # Download from Natural Earth
+    _SHAPEFILE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _country_polygons_gdf = gpd.read_file(_NATURALEARTH_URL)
+    # Cache for future use
+    try:
+        _country_polygons_gdf.to_file(_SHAPEFILE_CACHE_DIR / "ne_110m_admin_0_countries.shp")
+    except Exception:
+        pass  # Non-critical if caching fails
+
+    return _country_polygons_gdf
 
 
 @mcp.tool()
@@ -418,4 +458,135 @@ def calculate_anomaly(
             "end": baseline_end,
         },
         "description": "Values represent departure from baseline climatology",
+    }
+
+
+@mcp.tool()
+def list_countries() -> dict:
+    """
+    List available country names for use with mask_by_country.
+
+    Returns:
+        Dictionary with list of country names
+    """
+    try:
+        gdf = _get_country_boundaries()
+    except Exception as e:
+        return {"error": f"Failed to load country boundaries: {str(e)}"}
+
+    # Try different column names for country name
+    for col in ["NAME", "name", "ADMIN", "admin"]:
+        if col in gdf.columns:
+            names = sorted(gdf[col].dropna().unique().tolist())
+            return {"countries": names, "count": len(names)}
+
+    return {"error": "Could not find country name column in shapefile"}
+
+
+@mcp.tool()
+def mask_by_country(
+    dataset_id: str,
+    country_name: str,
+) -> dict:
+    """
+    Mask a dataset to a country's boundaries using Natural Earth polygons.
+
+    Grid cells outside the country are set to NaN.
+
+    Args:
+        dataset_id: ID of the dataset to mask
+        country_name: Country name (e.g. "Thailand", "United States of America").
+                     Use list_countries() to see available names.
+
+    Returns:
+        New dataset_id for the masked data
+    """
+    try:
+        ds = session_manager.get(dataset_id)
+        metadata = session_manager.get_metadata(dataset_id)
+    except KeyError as e:
+        return {"error": str(e)}
+
+    try:
+        import geopandas as gpd
+        import shapely
+        from shapely.geometry import MultiPolygon, Polygon
+    except ImportError:
+        return {"error": "geopandas and shapely required. Install with: pip install geopandas shapely"}
+
+    try:
+        gdf = _get_country_boundaries()
+    except Exception as e:
+        return {"error": f"Failed to load country boundaries: {str(e)}"}
+
+    # Find country - try different column names
+    country_row = None
+    for col in ["NAME", "name", "ADMIN", "admin"]:
+        if col in gdf.columns:
+            matches = gdf[gdf[col].str.lower() == country_name.lower()]
+            if len(matches) > 0:
+                country_row = matches.iloc[0]
+                break
+
+    if country_row is None:
+        # Try partial match
+        for col in ["NAME", "name", "ADMIN", "admin"]:
+            if col in gdf.columns:
+                matches = gdf[gdf[col].str.lower().str.contains(country_name.lower(), na=False)]
+                if len(matches) > 0:
+                    country_row = matches.iloc[0]
+                    break
+
+    if country_row is None:
+        return {"error": f"Country '{country_name}' not found. Use list_countries() to see available names."}
+
+    geometry = country_row.geometry
+
+    try:
+        # Get lon/lat arrays
+        if isinstance(ds, xr.DataArray):
+            lons = ds.lon.values
+            lats = ds.lat.values
+        else:
+            lons = ds.lon.values
+            lats = ds.lat.values
+
+        # Normalize longitudes to match the geometry (-180 to 180)
+        lon_orig = lons.copy()
+        if lons.max() > 180:
+            lons = np.where(lons > 180, lons - 360, lons)
+
+        # Create 2D mesh of lon/lat
+        lon2d, lat2d = np.meshgrid(lons, lats)
+
+        # Create mask using shapely.contains_xy (shapely >= 2.0)
+        mask = shapely.contains_xy(geometry, lon2d, lat2d)
+
+        # Convert to xarray DataArray with proper coordinates
+        mask_da = xr.DataArray(
+            mask,
+            dims=["lat", "lon"],
+            coords={"lat": ds.lat, "lon": ds.lon},
+        )
+
+        # Apply mask
+        ds_masked = ds.where(mask_da)
+
+    except Exception as e:
+        return {"error": f"Failed to apply country mask: {str(e)}"}
+
+    new_id = session_manager.store(
+        data=ds_masked,
+        source=metadata.source,
+        variable=metadata.variable,
+        model=metadata.model,
+        scenario=metadata.scenario,
+        description=f"{dataset_id} masked to {country_name}",
+    )
+
+    return {
+        "success": True,
+        "dataset_id": new_id,
+        "original_dataset_id": dataset_id,
+        "country": country_name,
     }

@@ -186,13 +186,34 @@ def calculate_trend(
         # Linear regression
         slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
 
+        # Detect temporal frequency from time coordinate
+        times = time_series.time.values
+        if len(times) >= 2:
+            # Calculate median time step in days
+            time_diffs = np.diff(times.astype("datetime64[D]").astype(float))
+            median_step_days = float(np.median(time_diffs))
+
+            if median_step_days > 300:
+                # Annual data: each step ~1 year, 10 steps per decade
+                steps_per_decade = 10
+                freq_label = "annual"
+            elif median_step_days > 25:
+                # Monthly data: each step ~1 month, 120 steps per decade
+                steps_per_decade = 120
+                freq_label = "monthly"
+            else:
+                # Daily data: each step ~1 day, 3652.5 steps per decade
+                steps_per_decade = 3652.5
+                freq_label = "daily"
+        else:
+            steps_per_decade = 3652.5
+            freq_label = "daily"
+
         # Convert slope to per-decade
-        # Assuming daily data, 365.25 days per year
-        days_per_decade = 365.25 * 10
-        slope_per_decade = slope * days_per_decade
+        slope_per_decade = slope * steps_per_decade
 
         # Confidence interval (95%)
-        ci_95 = 1.96 * std_err * days_per_decade
+        ci_95 = 1.96 * std_err * steps_per_decade
 
     except Exception as e:
         return {"error": f"Failed to calculate trend: {str(e)}"}
@@ -279,7 +300,7 @@ def calculate_regional_mean(
         "summary": {
             "mean": mean_val,
             "std": std_val,
-            "time_steps": regional_mean.dims.get("time", len(regional_mean)),
+            "time_steps": regional_mean.sizes.get("time", len(regional_mean)),
         },
     }
 
