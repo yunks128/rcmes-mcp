@@ -68,6 +68,24 @@ body {
   border-bottom: 3px solid white;
 }
 
+.nav-github {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 24px;
+  color: rgba(255, 255, 255, 0.8);
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: background 0.2s, color 0.2s;
+}
+
+.nav-github:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
 .sidebar {
   width: 320px;
   background: var(--surface);

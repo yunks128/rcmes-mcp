@@ -36,6 +36,15 @@ def _save_fig(fig, filename: str) -> str:
     return str(filepath)
 
 
+def _normalize_lons(data: xr.DataArray) -> xr.DataArray:
+    """Convert longitudes from 0-360 to -180/180 if needed."""
+    if float(data.lon.max()) > 180:
+        data = data.assign_coords(
+            lon=((data.lon + 180) % 360) - 180
+        ).sortby("lon")
+    return data
+
+
 @mcp.tool()
 def generate_map(
     dataset_id: str,
@@ -99,15 +108,23 @@ def generate_map(
             plot_data = data.compute()
             time_label = ""
 
+        # Normalize longitudes from 0-360 to -180/180
+        plot_data = _normalize_lons(plot_data)
+
+        # Detect if this is a global-extent map
+        lon_range = float(plot_data.lon.max()) - float(plot_data.lon.min())
+        is_global = lon_range > 300
+
         # Create figure
         if has_cartopy:
             fig, ax = plt.subplots(
-                figsize=(12, 8),
+                figsize=(14, 7) if is_global else (12, 8),
                 subplot_kw={"projection": ccrs.PlateCarree()}
             )
             ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
             ax.add_feature(cfeature.BORDERS, linewidth=0.3, linestyle="--")
-            ax.add_feature(cfeature.STATES, linewidth=0.2)
+            if not is_global:
+                ax.add_feature(cfeature.STATES, linewidth=0.2)
 
             im = ax.pcolormesh(
                 plot_data.lon,
@@ -118,12 +135,15 @@ def generate_map(
                 vmin=vmin,
                 vmax=vmax,
             )
-            ax.set_extent([
-                float(plot_data.lon.min()),
-                float(plot_data.lon.max()),
-                float(plot_data.lat.min()),
-                float(plot_data.lat.max()),
-            ])
+            if is_global:
+                ax.set_global()
+            else:
+                ax.set_extent([
+                    float(plot_data.lon.min()),
+                    float(plot_data.lon.max()),
+                    float(plot_data.lat.min()),
+                    float(plot_data.lat.max()),
+                ])
         else:
             fig, ax = plt.subplots(figsize=(12, 8))
             im = ax.pcolormesh(
@@ -334,7 +354,7 @@ def generate_comparison_map(
             if "time" in data.dims:
                 data = data.mean(dim="time")
 
-            all_data.append(data.compute())
+            all_data.append(_normalize_lons(data.compute()))
 
         vmin = min(float(d.min()) for d in all_data)
         vmax = max(float(d.max()) for d in all_data)
@@ -593,9 +613,16 @@ def generate_country_map(
             plot_data = data.compute()
             time_label = ""
 
+        # Normalize longitudes from 0-360 to -180/180
+        plot_data = _normalize_lons(plot_data)
+
+        # Detect global extent
+        lon_range = float(plot_data.lon.max()) - float(plot_data.lon.min())
+        is_global = lon_range > 300
+
         # Create figure with cartopy
         fig, ax = plt.subplots(
-            figsize=(12, 8),
+            figsize=(14, 7) if is_global else (12, 8),
             subplot_kw={"projection": ccrs.PlateCarree()},
         )
 
@@ -629,10 +656,6 @@ def generate_country_map(
                             break
 
                 if country_row is not None:
-                    from shapely.geometry import mapping
-                    from matplotlib.patches import PathPatch
-                    from matplotlib.path import Path as MplPath
-                    import cartopy.feature as cfeature_shape
                     from cartopy.feature import ShapelyFeature
 
                     feature = ShapelyFeature(
@@ -647,12 +670,15 @@ def generate_country_map(
                 pass  # Non-critical: skip country highlight if it fails
 
         # Set extent based on data
-        ax.set_extent([
-            float(plot_data.lon.min()),
-            float(plot_data.lon.max()),
-            float(plot_data.lat.min()),
-            float(plot_data.lat.max()),
-        ])
+        if is_global:
+            ax.set_global()
+        else:
+            ax.set_extent([
+                float(plot_data.lon.min()),
+                float(plot_data.lon.max()),
+                float(plot_data.lat.min()),
+                float(plot_data.lat.max()),
+            ])
 
         # Add colorbar
         cbar = plt.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
