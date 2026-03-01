@@ -792,11 +792,19 @@ async def _azure_chat(message: str, dataset_id: str | None) -> dict[str, Any]:
                         "message": f"Tool `{tool_name}` completed successfully.",
                     }
 
+                # Strip large fields (base64 images) before sending back to LLM
+                tool_result_for_llm = {
+                    k: v for k, v in tool_result.items()
+                    if k != "image_base64"
+                }
+                if "image_base64" in tool_result:
+                    tool_result_for_llm["image_generated"] = True
+
                 messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": json.dumps(tool_result, default=str),
+                        "content": json.dumps(tool_result_for_llm, default=str),
                     }
                 )
 
