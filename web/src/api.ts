@@ -209,6 +209,12 @@ export async function listCountries(): Promise<{ countries: string[]; count: num
   return fetchJson(`${API_BASE}/countries`);
 }
 
+export async function getCountryBounds(country_name: string): Promise<{
+  country: string; lat_min: number; lat_max: number; lon_min: number; lon_max: number;
+}> {
+  return fetchJson(`${API_BASE}/country-bounds/${encodeURIComponent(country_name)}`);
+}
+
 export async function maskByCountry(
   dataset_id: string,
   country_name: string

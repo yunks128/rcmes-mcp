@@ -124,6 +124,23 @@ function App() {
     }
   };
 
+  // Handle country selection — fetch bounds and auto-populate lat/lon
+  const handleCountryChange = async (country: string) => {
+    setSelectedCountry(country);
+    if (!country) return;
+    try {
+      const bounds = await api.getCountryBounds(country);
+      // Add ~1° buffer for edge effects
+      setLatMin(Math.max(-60, Math.floor(bounds.lat_min - 1)));
+      setLatMax(Math.min(90, Math.ceil(bounds.lat_max + 1)));
+      setLonMin(Math.max(-180, Math.floor(bounds.lon_min - 1)));
+      setLonMax(Math.min(180, Math.ceil(bounds.lon_max + 1)));
+      setSelectedRegion('Custom');
+    } catch (err) {
+      console.error('Failed to get country bounds:', err);
+    }
+  };
+
   // Add message to chat
   const addMessage = (role: 'user' | 'assistant', content: string, image?: string) => {
     setMessages((prev) => [...prev, { role, content, image }]);
@@ -165,11 +182,30 @@ function App() {
         summaryMsg += `**Variable:** ${selectedVariable}\n`;
         summaryMsg += `**Model:** ${selectedModel}\n`;
         summaryMsg += `**Scenario:** ${scenario}\n`;
-        summaryMsg += `**Region:** ${selectedRegion} (${latMin}°-${latMax}°N, ${lonMin}°-${lonMax}°E)\n`;
+        summaryMsg += `**Region:** ${selectedCountry || selectedRegion} (${latMin}°-${latMax}°N, ${lonMin}°-${lonMax}°E)\n`;
+        if (selectedCountry) {
+          summaryMsg += `**Country Mask:** ${selectedCountry}\n`;
+        }
         summaryMsg += `**Period:** ${startDate} to ${endDate}\n\n`;
         summaryMsg += `**Dimensions:** ${dims.time} time steps, ${dims.lat}×${dims.lon} grid\n`;
         summaryMsg += `**Dataset ID:** \`${result.dataset_id}\``;
         addMessage('assistant', summaryMsg);
+      }
+
+      // Auto-mask to country if selected
+      if (selectedCountry) {
+        const maskedIds: string[] = [];
+        for (let i = 0; i < loadedIds.length; i++) {
+          try {
+            const maskResult = await api.maskByCountry(loadedIds[i], selectedCountry);
+            maskedIds.push(maskResult.dataset_id);
+            addMessage('assistant', `Masked **${labels[i]}** to **${selectedCountry}**`);
+          } catch (err) {
+            console.error(`Failed to mask ${labels[i]} to ${selectedCountry}:`, err);
+            maskedIds.push(loadedIds[i]); // Fall back to unmasked
+          }
+        }
+        loadedIds.splice(0, loadedIds.length, ...maskedIds);
       }
 
       // Set the first loaded dataset as current, track all
@@ -570,6 +606,25 @@ function App() {
 
         <div className="divider" />
 
+        <h2>Country (Optional)</h2>
+
+        <div className="form-group">
+          <label>Country</label>
+          <select value={selectedCountry} onChange={(e) => handleCountryChange(e.target.value)}>
+            <option value="">None</option>
+            {countries.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+          {selectedCountry && (
+            <p className="empty-hint" style={{ color: '#10b981', fontSize: '11px', marginTop: '4px' }}>
+              Bounds auto-filled. Data will be masked to {selectedCountry} on load.
+            </p>
+          )}
+        </div>
+
+        <div className="divider" />
+
         <h2>Region</h2>
 
         <div className="form-group">
@@ -753,48 +808,6 @@ function App() {
           style={{ width: '100%' }}
         >
           Run Analysis
-        </button>
-
-        <div className="divider" />
-
-        <h2>Country Masking</h2>
-
-        <div className="form-group">
-          <label>Country</label>
-          <select value={selectedCountry} onChange={(e) => setSelectedCountry(e.target.value)}>
-            <option value="">Select country...</option>
-            {countries.map((c) => (
-              <option key={c} value={c}>{c}</option>
-            ))}
-          </select>
-        </div>
-
-        <button
-          className="btn-secondary"
-          onClick={async () => {
-            if (!currentDatasetId || !selectedCountry) {
-              setError('Please load data and select a country');
-              return;
-            }
-            setLoading(true);
-            setError(null);
-            try {
-              const result = await api.maskByCountry(currentDatasetId, selectedCountry);
-              setCurrentDatasetId(result.dataset_id);
-              await refreshDatasets();
-              addMessage('assistant', `Masked dataset to **${selectedCountry}**. New dataset ID: \`${result.dataset_id}\``);
-            } catch (err) {
-              const errMsg = err instanceof Error ? err.message : 'Masking failed';
-              setError(errMsg);
-              addMessage('assistant', `Error: ${errMsg}`);
-            } finally {
-              setLoading(false);
-            }
-          }}
-          disabled={loading || !currentDatasetId || !selectedCountry}
-          style={{ width: '100%' }}
-        >
-          Mask to Country
         </button>
 
         <div className="divider" />

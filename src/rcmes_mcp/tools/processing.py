@@ -461,6 +461,24 @@ def calculate_anomaly(
     }
 
 
+def get_country_bounds(country_name: str) -> dict:
+    """Get the bounding box (lat/lon) for a country."""
+    gdf = _get_country_boundaries()
+    for col in ["NAME", "name", "ADMIN", "admin"]:
+        if col in gdf.columns:
+            match = gdf[gdf[col].str.lower() == country_name.lower()]
+            if not match.empty:
+                bounds = match.geometry.union_all().bounds  # (minx, miny, maxx, maxy)
+                return {
+                    "country": country_name,
+                    "lat_min": bounds[1],
+                    "lat_max": bounds[3],
+                    "lon_min": bounds[0],
+                    "lon_max": bounds[2],
+                }
+    raise ValueError(f"Country '{country_name}' not found")
+
+
 @mcp.tool()
 def list_countries() -> dict:
     """

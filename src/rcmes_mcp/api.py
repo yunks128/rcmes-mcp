@@ -279,6 +279,16 @@ async def list_countries() -> dict[str, Any]:
     return result
 
 
+@app.get("/api/country-bounds/{country_name}")
+async def get_country_bounds(country_name: str) -> dict[str, Any]:
+    """Get bounding box for a country."""
+    try:
+        result = processing.get_country_bounds(country_name)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @app.post("/api/mask-by-country")
 async def mask_by_country(request: MaskByCountryRequest) -> dict[str, Any]:
     """Mask a dataset to a country's boundaries."""
