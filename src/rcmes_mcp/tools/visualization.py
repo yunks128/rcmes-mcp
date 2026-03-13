@@ -8,7 +8,9 @@ maps, time series plots, and Taylor diagrams.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
+import json
 import tempfile
 from pathlib import Path
 
@@ -17,6 +19,42 @@ import xarray as xr
 
 from rcmes_mcp.server import mcp
 from rcmes_mcp.utils.session import session_manager
+
+# Simple PNG cache directory
+_PLOT_CACHE_DIR = Path(tempfile.gettempdir()) / "rcmes_mcp_plot_cache"
+_PLOT_CACHE_DIR.mkdir(exist_ok=True)
+
+
+def _plot_cache_key(**kwargs) -> str:
+    """Generate a cache key from plot parameters."""
+    raw = json.dumps(kwargs, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _get_cached_plot(cache_key: str) -> dict | None:
+    """Return cached plot result if available."""
+    png_path = _PLOT_CACHE_DIR / f"{cache_key}.png"
+    meta_path = _PLOT_CACHE_DIR / f"{cache_key}.json"
+    if png_path.exists() and meta_path.exists():
+        with open(png_path, "rb") as f:
+            img_base64 = base64.b64encode(f.read()).decode("utf-8")
+        with open(meta_path) as f:
+            meta = json.load(f)
+        meta["image_base64"] = img_base64
+        meta["cached"] = True
+        return meta
+    return None
+
+
+def _cache_plot(cache_key: str, fig, result: dict) -> None:
+    """Save plot PNG and metadata to cache."""
+    png_path = _PLOT_CACHE_DIR / f"{cache_key}.png"
+    fig.savefig(png_path, format="png", dpi=150, bbox_inches="tight")
+    meta_path = _PLOT_CACHE_DIR / f"{cache_key}.json"
+    # Save metadata without image_base64
+    meta = {k: v for k, v in result.items() if k != "image_base64"}
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, default=str)
 
 
 def _fig_to_base64(fig) -> str:
@@ -68,6 +106,15 @@ def generate_map(
     Returns:
         Dictionary with base64-encoded image and file path
     """
+    # Check plot cache
+    cache_key = _plot_cache_key(
+        func="map", dataset_id=dataset_id, time_index=time_index,
+        title=title, colormap=colormap, vmin=vmin, vmax=vmax,
+    )
+    cached = _get_cached_plot(cache_key)
+    if cached:
+        return cached
+
     try:
         ds = session_manager.get(dataset_id)
         metadata = session_manager.get_metadata(dataset_id)
@@ -89,7 +136,7 @@ def generate_map(
         if isinstance(ds, xr.DataArray):
             data = ds
         else:
-            var_name = metadata.variable or list(ds.data_vars)[0]
+            var_name = metadata.variable if (metadata.variable and metadata.variable in ds.data_vars) else list(ds.data_vars)[0]
             data = ds[var_name]
 
         # Handle time dimension
@@ -168,19 +215,22 @@ def generate_map(
             model_str = f" ({metadata.model})" if metadata.model else ""
             ax.set_title(f"{metadata.variable}{model_str}\n{time_label}")
 
-        # Save and encode
+        # Save, encode, and cache
         filename = f"map_{dataset_id}.png"
         filepath = _save_fig(fig, filename)
         img_base64 = _fig_to_base64(fig)
-        plt.close(fig)
 
-        return {
+        result = {
             "success": True,
             "image_base64": img_base64,
             "file_path": filepath,
             "dataset_id": dataset_id,
             "time": time_label,
         }
+        _cache_plot(cache_key, fig, result)
+        plt.close(fig)
+
+        return result
 
     except Exception as e:
         return {"error": f"Failed to generate map: {str(e)}"}
@@ -210,6 +260,15 @@ def generate_timeseries_plot(
     if not dataset_ids:
         return {"error": "No dataset IDs provided"}
 
+    # Check plot cache
+    cache_key = _plot_cache_key(
+        func="timeseries", dataset_ids=dataset_ids, labels=labels,
+        title=title, show_trend=show_trend, show_uncertainty=show_uncertainty,
+    )
+    cached = _get_cached_plot(cache_key)
+    if cached:
+        return cached
+
     try:
         import matplotlib.pyplot as plt
         from scipy import stats
@@ -227,16 +286,24 @@ def generate_timeseries_plot(
             if isinstance(ds, xr.DataArray):
                 data = ds
             else:
-                var_name = metadata.variable or list(ds.data_vars)[0]
+                var_name = metadata.variable if (metadata.variable and metadata.variable in ds.data_vars) else list(ds.data_vars)[0]
                 data = ds[var_name]
 
-            # Calculate spatial mean if needed
-            if "lat" in data.dims and "lon" in data.dims:
+            # Calculate spatial mean (and std if needed) in a single compute pass
+            needs_spatial_reduce = "lat" in data.dims and "lon" in data.dims
+            if needs_spatial_reduce:
                 weights = np.cos(np.deg2rad(data.lat))
-                data = data.weighted(weights).mean(dim=["lat", "lon"])
-
-            # Convert to pandas for plotting
-            ts = data.compute()
+                mean_data = data.weighted(weights).mean(dim=["lat", "lon"])
+                if show_uncertainty:
+                    std_data = data.std(dim=["lat", "lon"])
+                    import dask
+                    ts, std_ts = dask.compute(mean_data, std_data)
+                else:
+                    ts = mean_data.compute()
+                    std_ts = None
+            else:
+                ts = data.compute()
+                std_ts = None
 
             # Generate label
             if labels and i < len(labels):
@@ -265,13 +332,12 @@ def generate_timeseries_plot(
                         label=f"{label} trend",
                     )
 
-            # Add uncertainty
-            if show_uncertainty and "lat" in ds.dims:
-                std = ds[var_name].std(dim=["lat", "lon"]).compute()
+            # Add uncertainty envelope
+            if std_ts is not None:
                 ax.fill_between(
                     ts.time.values,
-                    ts.values - std.values,
-                    ts.values + std.values,
+                    ts.values - std_ts.values,
+                    ts.values + std_ts.values,
                     alpha=0.2,
                 )
 
@@ -283,18 +349,21 @@ def generate_timeseries_plot(
         if title:
             ax.set_title(title)
 
-        # Save and encode
+        # Save, encode, and cache
         filename = f"timeseries_{dataset_ids[0]}.png"
         filepath = _save_fig(fig, filename)
         img_base64 = _fig_to_base64(fig)
-        plt.close(fig)
 
-        return {
+        result = {
             "success": True,
             "image_base64": img_base64,
             "file_path": filepath,
             "dataset_ids": dataset_ids,
         }
+        _cache_plot(cache_key, fig, result)
+        plt.close(fig)
+
+        return result
 
     except Exception as e:
         return {"error": f"Failed to generate time series plot: {str(e)}"}
@@ -348,7 +417,7 @@ def generate_comparison_map(
             if isinstance(ds, xr.DataArray):
                 data = ds
             else:
-                var_name = metadata.variable or list(ds.data_vars)[0]
+                var_name = metadata.variable if (metadata.variable and metadata.variable in ds.data_vars) else list(ds.data_vars)[0]
                 data = ds[var_name]
 
             if "time" in data.dims:
@@ -595,7 +664,7 @@ def generate_country_map(
         if isinstance(ds, xr.DataArray):
             data = ds
         else:
-            var_name = metadata.variable or list(ds.data_vars)[0]
+            var_name = metadata.variable if (metadata.variable and metadata.variable in ds.data_vars) else list(ds.data_vars)[0]
             data = ds[var_name]
 
         # Handle time dimension
@@ -737,7 +806,7 @@ def generate_histogram(
         if isinstance(ds, xr.DataArray):
             data = ds
         else:
-            var_name = metadata.variable or list(ds.data_vars)[0]
+            var_name = metadata.variable if (metadata.variable and metadata.variable in ds.data_vars) else list(ds.data_vars)[0]
             data = ds[var_name]
 
         values = data.values.flatten()

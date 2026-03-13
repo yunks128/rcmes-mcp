@@ -10,6 +10,10 @@
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
   },
   "dependencies": {
+    "@microsoft/fetch-event-source": "^2.0.1",
+    "@types/dagre": "^0.7.54",
+    "@xyflow/react": "^12.10.1",
+    "dagre": "^0.8.5",
     "mermaid": "^10.6.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"

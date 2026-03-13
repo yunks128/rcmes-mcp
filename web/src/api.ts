@@ -89,7 +89,12 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 // Metadata endpoints
-export async function listModels(): Promise<{ models: string[] }> {
+export interface ModelInfo {
+  name: string;
+  description: string;
+}
+
+export async function listModels(): Promise<{ models: string[]; models_info?: ModelInfo[] }> {
   return fetchJson(`${API_BASE}/models`);
 }
 

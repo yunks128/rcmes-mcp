@@ -1,5 +1,9 @@
 # RCMES-MCP
 
+[![SLIM](https://img.shields.io/badge/Best%20Practices%20from-SLIM-blue)](https://nasa-ammos.github.io/slim/)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+
 **Regional Climate Model Evaluation System as an MCP Server**
 
 RCMES-MCP provides AI agents with tools to analyze NASA's climate datasets through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/). It enables conversational interaction with massive climate data (NEX-GDDP-CMIP6: 38TB) without requiring users to download data or write Python scripts.
@@ -260,9 +264,21 @@ ruff check src/
 mypy src/
 ```
 
+## Contributing
+
+Interested in contributing? Check out our [CONTRIBUTING.md](CONTRIBUTING.md) guide. We welcome bug reports, feature requests, documentation improvements, and code contributions.
+
+Please read our [Code of Conduct](CODE_OF_CONDUCT.md) and [Governance](GOVERNANCE.md) model before participating.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a list of notable changes to this project.
+
 ## License
 
-Apache License 2.0
+This project is licensed under the [Apache License 2.0](LICENSE).
+
+Copyright (c) 2025 California Institute of Technology ("Caltech"). U.S. Government sponsorship acknowledged.
 
 ## References
 

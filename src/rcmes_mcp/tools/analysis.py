@@ -41,7 +41,7 @@ def calculate_statistics(
     if isinstance(ds, xr.DataArray):
         data = ds
     else:
-        var_name = metadata.variable or list(ds.data_vars)[0]
+        var_name = metadata.variable if (metadata.variable and metadata.variable in ds.data_vars) else list(ds.data_vars)[0]
         data = ds[var_name]
 
     results = {
@@ -50,20 +50,17 @@ def calculate_statistics(
     }
 
     try:
-        # Compute in chunks to avoid memory issues
-        if statistic in ["mean", "all"]:
-            results["mean"] = float(data.mean().compute())
+        if statistic == "all":
+            # Single compute pass for all basic stats
+            import dask
+            mean_val, std_val, min_val, max_val = dask.compute(
+                data.mean(), data.std(), data.min(), data.max()
+            )
+            results["mean"] = float(mean_val)
+            results["std"] = float(std_val)
+            results["min"] = float(min_val)
+            results["max"] = float(max_val)
 
-        if statistic in ["std", "all"]:
-            results["std"] = float(data.std().compute())
-
-        if statistic in ["min", "all"]:
-            results["min"] = float(data.min().compute())
-
-        if statistic in ["max", "all"]:
-            results["max"] = float(data.max().compute())
-
-        if statistic in ["percentiles", "all"]:
             # Compute percentiles (subsample for large datasets)
             sample = data.values.flatten()
             if len(sample) > 1000000:
@@ -75,6 +72,26 @@ def calculate_statistics(
                 "p75": float(np.nanpercentile(sample, 75)),
                 "p95": float(np.nanpercentile(sample, 95)),
             }
+        else:
+            if statistic == "mean":
+                results["mean"] = float(data.mean().compute())
+            elif statistic == "std":
+                results["std"] = float(data.std().compute())
+            elif statistic == "min":
+                results["min"] = float(data.min().compute())
+            elif statistic == "max":
+                results["max"] = float(data.max().compute())
+            elif statistic == "percentiles":
+                sample = data.values.flatten()
+                if len(sample) > 1000000:
+                    sample = np.random.choice(sample[~np.isnan(sample)], 1000000)
+                results["percentiles"] = {
+                    "p5": float(np.nanpercentile(sample, 5)),
+                    "p25": float(np.nanpercentile(sample, 25)),
+                    "p50": float(np.nanpercentile(sample, 50)),
+                    "p75": float(np.nanpercentile(sample, 75)),
+                    "p95": float(np.nanpercentile(sample, 95)),
+                }
 
     except Exception as e:
         return {"error": f"Failed to compute statistics: {str(e)}"}
@@ -158,7 +175,7 @@ def calculate_trend(
     if isinstance(ds, xr.DataArray):
         data = ds
     else:
-        var_name = metadata.variable or list(ds.data_vars)[0]
+        var_name = metadata.variable if (metadata.variable and metadata.variable in ds.data_vars) else list(ds.data_vars)[0]
         data = ds[var_name]
 
     try:
@@ -265,7 +282,7 @@ def calculate_regional_mean(
     if isinstance(ds, xr.DataArray):
         data = ds
     else:
-        var_name = metadata.variable or list(ds.data_vars)[0]
+        var_name = metadata.variable if (metadata.variable and metadata.variable in ds.data_vars) else list(ds.data_vars)[0]
         data = ds[var_name]
 
     try:
@@ -275,6 +292,12 @@ def calculate_regional_mean(
             regional_mean = data.weighted(weights).mean(dim=["lat", "lon"])
         else:
             regional_mean = data.mean(dim=["lat", "lon"])
+
+        # Eagerly compute the regional mean (1D time series) so downstream
+        # tools don't need to re-pull from S3. This is the key optimization:
+        # computing a ~30KB 1D result once instead of re-materializing the
+        # full multi-GB Dask graph on every subsequent operation.
+        regional_mean = regional_mean.compute()
 
     except Exception as e:
         return {"error": f"Failed to calculate regional mean: {str(e)}"}
@@ -288,9 +311,9 @@ def calculate_regional_mean(
         description=f"{'Area-weighted ' if area_weighted else ''}regional mean of {dataset_id}",
     )
 
-    # Calculate summary stats
-    mean_val = float(regional_mean.mean().compute())
-    std_val = float(regional_mean.std().compute())
+    # Summary stats are instant since regional_mean is already computed
+    mean_val = float(regional_mean.mean())
+    std_val = float(regional_mean.std())
 
     return {
         "success": True,
@@ -358,9 +381,14 @@ def calculate_bias(
         else:
             return {"error": f"Invalid metric '{metric}'. Use: mean, absolute, relative"}
 
-        # Calculate overall statistics
-        spatial_mean_bias = float(bias.mean().compute())
-        spatial_rmse = float(np.sqrt(((model_mean - ref_mean) ** 2).mean()).compute())
+        # Calculate overall statistics in a single compute pass
+        import dask
+        spatial_mean_bias, spatial_rmse = dask.compute(
+            bias.mean(),
+            np.sqrt(((model_mean - ref_mean) ** 2).mean()),
+        )
+        spatial_mean_bias = float(spatial_mean_bias)
+        spatial_rmse = float(spatial_rmse)
 
     except Exception as e:
         return {"error": f"Failed to calculate bias: {str(e)}"}

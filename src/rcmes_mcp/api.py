@@ -12,9 +12,12 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +36,7 @@ import xarray as xr
 from rcmes_mcp.utils.session import session_manager
 
 # Import RCMES tools
-from rcmes_mcp.tools import analysis, data_access, indices, processing, visualization
+from rcmes_mcp.tools import analysis, code_execution, data_access, indices, processing, visualization
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +159,11 @@ class CountryMapRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str = Field(..., description="User message")
+    dataset_id: str | None = Field(None, description="Current dataset ID for context")
+
+
+class ChatStreamRequest(BaseModel):
+    messages: list[dict] = Field(..., description="Conversation history [{role, content}]")
     dataset_id: str | None = Field(None, description="Current dataset ID for context")
 
 
@@ -539,8 +547,91 @@ def _get_chat_tools() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "load_climate_data",
+                "description": "Load climate data from NASA NEX-GDDP-CMIP6 dataset. Returns a dataset_id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "variable": {"type": "string", "description": "Climate variable: tasmax, tasmin, pr, hurs, huss, rlds, rsds, sfcWind"},
+                        "model": {"type": "string", "description": "Climate model (e.g., ACCESS-CM2, GFDL-ESM4, MRI-ESM2-0)"},
+                        "scenario": {"type": "string", "description": "Emissions scenario: historical, ssp126, ssp245, ssp370, ssp585"},
+                        "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
+                        "end_date": {"type": "string", "description": "End date YYYY-MM-DD"},
+                        "lat_min": {"type": "number"}, "lat_max": {"type": "number"},
+                        "lon_min": {"type": "number"}, "lon_max": {"type": "number"},
+                    },
+                    "required": ["variable", "model", "scenario", "start_date", "end_date", "lat_min", "lat_max", "lon_min", "lon_max"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "spatial_subset",
+                "description": "Subset a dataset by lat/lon bounding box",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string"},
+                        "lat_min": {"type": "number"}, "lat_max": {"type": "number"},
+                        "lon_min": {"type": "number"}, "lon_max": {"type": "number"},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "temporal_subset",
+                "description": "Subset a dataset by time range",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string"},
+                        "start_date": {"type": "string"},
+                        "end_date": {"type": "string"},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "regrid",
+                "description": "Regrid a dataset to a new resolution",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string"},
+                        "target_resolution": {"type": "number", "description": "Target resolution in degrees"},
+                        "method": {"type": "string", "default": "bilinear"},
+                    },
+                    "required": ["dataset_id", "target_resolution"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "convert_units",
+                "description": "Convert dataset units (e.g., K to degC, kg/m2/s to mm/day)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string"},
+                        "target_unit": {"type": "string", "description": "Target units (degC, mm/day, etc.)"},
+                    },
+                    "required": ["dataset_id", "target_unit"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "calculate_statistics",
-                "description": "Calculate summary statistics (mean, std, min, max) for a loaded dataset",
+                "description": "Calculate summary statistics (mean, std, min, max, percentiles) for a loaded dataset",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -554,7 +645,7 @@ def _get_chat_tools() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "calculate_trend",
-                "description": "Calculate temporal trend with statistical significance",
+                "description": "Calculate temporal trend (slope per decade, p-value, R-squared)",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -612,7 +703,7 @@ def _get_chat_tools() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "generate_map",
-                "description": "Generate a spatial map visualization",
+                "description": "Generate a spatial map visualization of the data",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -627,7 +718,7 @@ def _get_chat_tools() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "generate_timeseries_plot",
-                "description": "Generate a time series plot",
+                "description": "Generate a time series plot with optional trend line",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -684,8 +775,22 @@ def _get_chat_tools() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "get_country_bounds",
+                "description": "Get the lat/lon bounding box for a country. Use this BEFORE load_climate_data when the user specifies a country, to get the correct bounds.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "country_name": {"type": "string", "description": "Country name (e.g., 'India', 'Thailand', 'Brazil')"},
+                    },
+                    "required": ["country_name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "calculate_batch_etccdi",
-                "description": "Calculate multiple ETCCDI climate extreme indices at once",
+                "description": "Calculate multiple ETCCDI climate extreme indices at once (TXx, TX90p, SU, FD, Rx1day, etc.)",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -717,11 +822,57 @@ def _get_chat_tools() -> list[dict]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate_correlation",
+                "description": "Calculate temporal or spatial correlation between two datasets",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset1_id": {"type": "string"},
+                        "dataset2_id": {"type": "string"},
+                        "correlation_type": {"type": "string", "enum": ["temporal", "spatial"], "default": "temporal"},
+                    },
+                    "required": ["dataset1_id", "dataset2_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "execute_python_code",
+                "description": (
+                    "Execute Python code for custom analysis that built-in tools cannot handle. "
+                    "Has access to: xarray (xr), numpy (np), pandas (pd), matplotlib.pyplot (plt), scipy. "
+                    "Use get_dataset(dataset_id) to access loaded datasets. "
+                    "Use store_dataset(data, description) to save results for later use. "
+                    "Use save_to_netcdf(data, path) or save_to_csv(data, path) to save files "
+                    "(NEVER use data.to_netcdf() directly). "
+                    "Use print() to show output to the user."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "Python code to execute",
+                        },
+                    },
+                    "required": ["code"],
+                },
+            },
+        },
     ]
 
 
 # Map tool names to their implementations for the chat endpoint
 _CHAT_TOOL_IMPLS: dict[str, Any] = {
+    "load_climate_data": data_access.load_climate_data,
+    "spatial_subset": processing.spatial_subset,
+    "temporal_subset": processing.temporal_subset,
+    "regrid": processing.regrid,
+    "convert_units": processing.convert_units,
     "calculate_statistics": analysis.calculate_statistics,
     "calculate_trend": analysis.calculate_trend,
     "calculate_climatology": analysis.calculate_climatology,
@@ -732,17 +883,438 @@ _CHAT_TOOL_IMPLS: dict[str, Any] = {
     "generate_histogram": visualization.generate_histogram,
     "mask_by_country": processing.mask_by_country,
     "list_countries": processing.list_countries,
+    "get_country_bounds": processing.get_country_bounds,
     "calculate_batch_etccdi": indices.calculate_batch_etccdi,
     "generate_country_map": visualization.generate_country_map,
+    "calculate_correlation": analysis.calculate_correlation,
+    "execute_python_code": code_execution.execute_python_code,
 }
 
-_CHAT_SYSTEM_PROMPT = (
-    "You are a climate research assistant embedded in a web UI. "
-    "The user may have a dataset already loaded (identified by a dataset_id). "
-    "You have access to tools for statistics, trends, heatwave analysis, and visualization. "
-    "When the user asks for analysis or plots, call the appropriate tool with the dataset_id. "
-    "Always explain results in accessible language."
-)
+def _build_system_prompt() -> str:
+    """Build the system prompt with actual available models, variables, scenarios."""
+    from rcmes_mcp.utils.cloud import CMIP6_MODELS, CMIP6_VARIABLES, CMIP6_SCENARIOS
+
+    models_str = ", ".join(CMIP6_MODELS[:15])
+    vars_str = ", ".join(f"{k} ({v['long_name']})" for k, v in CMIP6_VARIABLES.items())
+    scenarios_str = "\n".join(f"  - {k}: {v}" for k, v in CMIP6_SCENARIOS.items())
+
+    return (
+        "You are RCMES Climate Assistant, created by NASA's Jet Propulsion Laboratory (JPL). "
+        "You are NOT created by OpenAI. If asked who made you, say you were built by NASA JPL. "
+        "You are an AI that helps researchers analyze NASA's "
+        "NEX-GDDP-CMIP6 (NASA Earth Exchange Global Daily Downscaled Projections, "
+        "Coupled Model Intercomparison Project Phase 6) climate projection data "
+        "(0.25 degree resolution, daily, 1950-2100). "
+        "You can load data, process it, run analyses, and create visualizations.\n\n"
+
+        "## IMPORTANT: Ask ONE question at a time\n"
+        "When the user's request is missing key parameters, guide them step by step. "
+        "Ask only ONE question per message and wait for the answer before asking the next. "
+        "NEVER ask multiple questions in a single message.\n\n"
+
+        "Format each question with a numbered list of options so the user can pick easily.\n\n"
+
+        "When NO dataset is loaded yet, follow this order (skip steps the user already answered):\n"
+        "Step 1 - Ask what they want to study (temperature trends, precipitation, extremes, etc.)\n"
+        "Step 2 - Ask which variable:\n"
+        "   1. tasmax - Daily Maximum Temperature\n"
+        "   2. tasmin - Daily Minimum Temperature\n"
+        "   3. pr - Precipitation\n"
+        "   4. tas - Near-Surface Air Temperature\n"
+        "   (list only the most relevant 4-6 options)\n"
+        "Step 3 - Ask which climate model:\n"
+        "   1. ACCESS-CM2\n"
+        "   2. GFDL-ESM4\n"
+        "   3. MRI-ESM2-0\n"
+        "   (suggest 4-6 popular models)\n"
+        "Step 4 - Ask about the scenario:\n"
+        "   1. ssp245 - Middle of the road\n"
+        "   2. ssp126 - Low emissions (sustainability)\n"
+        "   3. ssp370 - High emissions\n"
+        "   4. ssp585 - Very high emissions\n"
+        "Step 5 - Ask about region (offer presets + custom):\n"
+        "   1. California (32-42N, 124-114W)\n"
+        "   2. Texas (25.5-36.5N, 106.5-93.5W)\n"
+        "   3. Thailand\n"
+        "   4. Global\n"
+        "   5. Custom (I'll specify coordinates)\n"
+        "Step 6 - Ask about time period (suggest decade ranges)\n\n"
+
+        "You may skip steps if the user already specified those parameters. "
+        "For example, if they say 'I want to look at temperature in California', "
+        "you already know the variable (tasmax) and region, so skip to asking model.\n\n"
+
+        "## CRITICAL: Always suggest next steps\n"
+        "After EVERY completed action (loading data, generating a plot, running analysis, etc.), "
+        "you MUST end your response with a numbered list of next-step options. "
+        "This is required — never end a response without offering choices.\n\n"
+        "After loading data:\n"
+        "  **What would you like to do next?**\n"
+        "  1. Show a spatial map\n"
+        "  2. Plot the time series with trend\n"
+        "  3. Calculate statistics\n"
+        "  4. Analyze extreme heat events\n"
+        "  5. Compare with another scenario\n\n"
+        "After generating a visualization or analysis:\n"
+        "  **What would you like to do next?**\n"
+        "  1. Show a spatial map of the data\n"
+        "  2. Calculate climate extreme indices (ETCCDI)\n"
+        "  3. Analyze heatwave patterns\n"
+        "  4. Compare with a different scenario or model\n"
+        "  5. Load a different variable or region\n"
+        "  6. Download the data\n\n"
+        "Adapt the options based on what has already been done — don't repeat completed steps. "
+        "Always present at least 3-4 relevant options.\n\n"
+
+        "## Available Data\n"
+        f"**Models** ({len(CMIP6_MODELS)} total): {models_str}, ...\n"
+        f"**Variables**: {vars_str}\n"
+        f"**Scenarios**:\n{scenarios_str}\n"
+        "**Time range**: historical (1950-2014), SSP projections (2015-2100)\n"
+        "**Resolution**: 0.25 degree (~25km)\n\n"
+
+        "## Capabilities\n"
+        "- **Data loading**: load_climate_data\n"
+        "- **Processing**: spatial_subset, temporal_subset, regrid, convert_units, mask_by_country\n"
+        "- **Analysis**: calculate_statistics, calculate_trend, calculate_climatology, "
+        "calculate_regional_mean, analyze_heatwaves, calculate_batch_etccdi, calculate_correlation\n"
+        "- **Visualization**: generate_map, generate_timeseries_plot, generate_histogram, generate_country_map\n\n"
+
+        "## Python Code Execution\n"
+        "You can write and execute Python code using `execute_python_code` for custom analyses "
+        "that built-in tools cannot handle. Examples:\n"
+        "- Custom statistical tests, curve fitting, regression\n"
+        "- Complex data transformations or reshaping\n"
+        "- Multi-dataset computations or custom comparisons\n"
+        "- Custom visualizations beyond the standard plot types\n"
+        "- Any analysis requiring custom logic\n\n"
+        "Use `get_dataset('dataset_id')` to access loaded data, `store_dataset(data, 'desc')` to save results. "
+        "Use `save_to_netcdf(data, '/tmp/file.nc')` or `save_to_csv(data, '/tmp/file.csv')` to save files "
+        "(do NOT use `data.to_netcdf()` directly — it will fail on in-memory datasets). "
+        "Libraries available: xarray (xr), numpy (np), pandas (pd), matplotlib.pyplot (plt), scipy.\n"
+        "Always use `print()` to show results. Prefer built-in tools for standard operations.\n\n"
+
+        "## Guidelines\n"
+        "- When the user mentions a region by name, use appropriate lat/lon bounds\n"
+        "- Chain tools as needed: load -> convert_units -> analyze -> visualize\n"
+        "- Always convert temperature from Kelvin to Celsius (use convert_units with target_unit='degC')\n"
+        "- Explain results in plain, accessible language\n"
+        "- Common regions: California (32-42N, 124-114W), Texas (25.5-36.5N, 106.5-93.5W), "
+        "Florida (24.5-31N, 87.5-80W), Global (-60-90N, -180-180E)\n\n"
+        "## CRITICAL: Ambiguous country names\n"
+        "Some country names are ambiguous (e.g., 'Korea' could be South Korea or North Korea, "
+        "'Congo' could be Republic of the Congo or Democratic Republic of the Congo). "
+        "If `get_country_bounds` returns an 'ambiguous' result with multiple matches, "
+        "you MUST ask the user to clarify which country they mean before proceeding. "
+        "NEVER assume one over the other — always ask.\n\n"
+
+        "## CRITICAL: Country-specific data loading\n"
+        "When the user specifies a COUNTRY (e.g., India, Thailand, Brazil):\n"
+        "1. First call `get_country_bounds` to get the country's bounding box\n"
+        "2. If the result contains 'ambiguous: true', ask the user to pick from the listed matches\n"
+        "3. Then call `load_climate_data` using those lat/lon bounds (add ~1 degree buffer)\n"
+        "4. Then call `mask_by_country` to clip the data precisely to the country's borders\n"
+        "NEVER load global data when a country is specified. Always use the country's bounding box.\n"
+        "This is critical for performance — global data is extremely large and slow to process."
+    )
+
+
+def _extract_dataset_ids_from_args(args: dict) -> list[str]:
+    """Extract input dataset IDs from tool arguments."""
+    ids = []
+    for key in ("dataset_id", "dataset1_id", "dataset2_id"):
+        if key in args:
+            ids.append(args[key])
+    if "dataset_ids" in args:
+        ids.extend(args["dataset_ids"])
+    return ids
+
+
+def _extract_dataset_ids_from_result(result: dict) -> list[str]:
+    """Extract output dataset IDs from tool results."""
+    ids = []
+    if "dataset_id" in result and result["dataset_id"]:
+        ids.append(result["dataset_id"])
+    if "computed_indices" in result:
+        ids.extend(result["computed_indices"].values())
+    return ids
+
+
+def _summarize_tool_result(tool_name: str, result: dict) -> str:
+    """Create a short summary of a tool result for the DAG."""
+    if "error" in result:
+        return f"Error: {result['error'][:100]}"
+    if tool_name == "calculate_statistics":
+        mean = result.get("mean")
+        return f"mean={mean:.2f}" if mean is not None else "computed"
+    if tool_name == "calculate_trend":
+        trend = result.get("trend", {})
+        slope = trend.get("slope_per_decade")
+        return f"slope={slope:.4f}/decade" if slope is not None else "computed"
+    if tool_name in ("generate_map", "generate_timeseries_plot", "generate_histogram", "generate_country_map"):
+        return "image generated" if result.get("image_base64") else "no image"
+    if tool_name == "load_climate_data":
+        dims = result.get("dimensions", {})
+        return f"loaded {dims.get('time', '?')}t x {dims.get('lat', '?')}x{dims.get('lon', '?')}"
+    if tool_name == "execute_python_code":
+        stdout = result.get("stdout", "")
+        n_images = len(result.get("images", []))
+        parts = []
+        if stdout:
+            parts.append(stdout[:200])
+        if n_images:
+            parts.append(f"{n_images} figure{'s' if n_images > 1 else ''}")
+        return " | ".join(parts) if parts else "code executed"
+    if "dataset_id" in result:
+        return f"dataset_id={result['dataset_id']}"
+    return "completed"
+
+
+def _sse_event(event: str, data: dict) -> str:
+    """Format a Server-Sent Event."""
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+async def _stream_chat(messages: list[dict], dataset_id: str | None):
+    """Async generator that streams SSE events for a chat interaction."""
+    client = _get_azure_client()
+    if client is None:
+        yield _sse_event("message_start", {"request_id": "no-client"})
+        yield _sse_event("text_delta", {"content": "Azure OpenAI is not configured. Please set AZURE_OPENAI_ENDPOINT."})
+        yield _sse_event("message_end", {"request_id": "no-client"})
+        return
+
+    request_id = str(uuid.uuid4())[:8]
+    deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+    tools = _get_chat_tools()
+
+    context = ""
+    if dataset_id:
+        context = f"\n\nThe user currently has dataset '{dataset_id}' loaded."
+    # List available datasets for context
+    try:
+        loaded = data_access.list_loaded_datasets()
+        ds_list = loaded.get("datasets", [])
+        if ds_list:
+            context += "\n\nCurrently loaded datasets:\n"
+            for ds_info in ds_list[:10]:
+                context += f"- {ds_info.get('id')}: {ds_info.get('variable', '?')} / {ds_info.get('model', '?')} / {ds_info.get('scenario', '?')}\n"
+    except Exception:
+        pass
+
+    full_messages = [
+        {"role": "system", "content": _build_system_prompt() + context},
+        *messages,
+    ]
+
+    yield _sse_event("message_start", {"request_id": request_id})
+
+    try:
+        while True:
+            # Stream the response
+            stream = client.chat.completions.create(
+                model=deployment,
+                messages=full_messages,
+                tools=tools,
+                stream=True,
+            )
+
+            collected_content = ""
+            tool_calls_accum: dict[int, dict] = {}  # index -> {id, name, arguments}
+
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                finish_reason = chunk.choices[0].finish_reason
+
+                # Stream text content
+                if delta.content:
+                    collected_content += delta.content
+                    yield _sse_event("text_delta", {"content": delta.content})
+
+                # Accumulate tool call deltas
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tool_calls_accum:
+                            tool_calls_accum[idx] = {"id": "", "name": "", "arguments": ""}
+                        if tc_delta.id:
+                            tool_calls_accum[idx]["id"] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                tool_calls_accum[idx]["name"] = tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tool_calls_accum[idx]["arguments"] += tc_delta.function.arguments
+
+            # If finish_reason is stop, we're done
+            if not tool_calls_accum:
+                break
+
+            # Process tool calls
+            if collected_content:
+                full_messages.append({"role": "assistant", "content": collected_content, "tool_calls": [
+                    {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": tc["arguments"]}}
+                    for tc in tool_calls_accum.values()
+                ]})
+            else:
+                full_messages.append({"role": "assistant", "content": None, "tool_calls": [
+                    {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": tc["arguments"]}}
+                    for tc in tool_calls_accum.values()
+                ]})
+
+            for tc in tool_calls_accum.values():
+                tool_call_id = tc["id"]
+                tool_name = tc["name"]
+                try:
+                    args = json.loads(tc["arguments"])
+                except json.JSONDecodeError:
+                    args = {}
+
+                input_ids = _extract_dataset_ids_from_args(args)
+                yield _sse_event("tool_start", {
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "args": args,
+                    "inputs": input_ids,
+                })
+
+                impl = _CHAT_TOOL_IMPLS.get(tool_name)
+                start_time = time.time()
+
+                if impl is None:
+                    tool_result = {"error": f"Unknown tool: {tool_name}"}
+                    yield _sse_event("tool_error", {
+                        "tool_call_id": tool_call_id,
+                        "tool_name": tool_name,
+                        "error": tool_result["error"],
+                        "duration_ms": 0,
+                    })
+                else:
+                    try:
+                        # For long-running tools, stream progress events
+                        if tool_name == "load_climate_data":
+                            from rcmes_mcp.tools.data_access import _thread_local as _da_tl
+                            loop = asyncio.get_running_loop()
+                            progress_queue: asyncio.Queue = asyncio.Queue()
+
+                            def _progress_cb(completed: int, total: int, detail: str):
+                                loop.call_soon_threadsafe(
+                                    progress_queue.put_nowait,
+                                    {"completed": completed, "total": total, "detail": detail},
+                                )
+
+                            def _run_with_progress():
+                                _da_tl.progress_callback = _progress_cb
+                                try:
+                                    return impl(**args)
+                                finally:
+                                    _da_tl.progress_callback = None
+
+                            task = asyncio.ensure_future(asyncio.to_thread(_run_with_progress))
+
+                            while not task.done():
+                                try:
+                                    item = await asyncio.wait_for(progress_queue.get(), timeout=0.3)
+                                    yield _sse_event("tool_progress", {
+                                        "tool_call_id": tool_call_id,
+                                        "progress": item,
+                                    })
+                                except asyncio.TimeoutError:
+                                    continue
+
+                            tool_result = task.result()
+
+                            # Drain remaining progress events
+                            while not progress_queue.empty():
+                                item = progress_queue.get_nowait()
+                                yield _sse_event("tool_progress", {
+                                    "tool_call_id": tool_call_id,
+                                    "progress": item,
+                                })
+                        else:
+                            # Run tool in thread pool
+                            tool_result = await asyncio.to_thread(impl, **args)
+
+                        duration_ms = int((time.time() - start_time) * 1000)
+
+                        if "error" in tool_result:
+                            yield _sse_event("tool_error", {
+                                "tool_call_id": tool_call_id,
+                                "tool_name": tool_name,
+                                "error": tool_result["error"],
+                                "duration_ms": duration_ms,
+                            })
+                        else:
+                            # Emit image(s) separately if present
+                            if tool_result.get("image_base64"):
+                                yield _sse_event("image", {
+                                    "tool_call_id": tool_call_id,
+                                    "image_base64": tool_result["image_base64"],
+                                })
+                            for img in tool_result.get("images", []):
+                                yield _sse_event("image", {
+                                    "tool_call_id": tool_call_id,
+                                    "image_base64": img,
+                                })
+
+                            output_ids = _extract_dataset_ids_from_result(tool_result)
+                            summary = _summarize_tool_result(tool_name, tool_result)
+                            yield _sse_event("tool_complete", {
+                                "tool_call_id": tool_call_id,
+                                "tool_name": tool_name,
+                                "result_summary": summary,
+                                "outputs": output_ids,
+                                "duration_ms": duration_ms,
+                                "status": "success",
+                            })
+                    except Exception as e:
+                        duration_ms = int((time.time() - start_time) * 1000)
+                        tool_result = {"error": str(e)}
+                        yield _sse_event("tool_error", {
+                            "tool_call_id": tool_call_id,
+                            "tool_name": tool_name,
+                            "error": str(e),
+                            "duration_ms": duration_ms,
+                        })
+
+                # Strip large fields before sending back to LLM
+                tool_result_for_llm = {
+                    k: v for k, v in tool_result.items()
+                    if k not in ("image_base64", "images")
+                }
+                if "image_base64" in tool_result:
+                    tool_result_for_llm["image_generated"] = True
+                if tool_result.get("images"):
+                    tool_result_for_llm["images_generated"] = len(tool_result["images"])
+
+                full_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps(tool_result_for_llm, default=str),
+                })
+
+            # Continue the loop to get the next response
+
+    except Exception as e:
+        logger.exception("Streaming chat error")
+        yield _sse_event("text_delta", {"content": f"\n\nError: {e}"})
+
+    yield _sse_event("message_end", {"request_id": request_id})
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(request: ChatStreamRequest):
+    """Stream a chat response as Server-Sent Events."""
+    return StreamingResponse(
+        _stream_chat(request.messages, request.dataset_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 async def _azure_chat(message: str, dataset_id: str | None) -> dict[str, Any]:
@@ -759,7 +1331,7 @@ async def _azure_chat(message: str, dataset_id: str | None) -> dict[str, Any]:
         context = f"\n\nThe user currently has dataset '{dataset_id}' loaded."
 
     messages = [
-        {"role": "system", "content": _CHAT_SYSTEM_PROMPT + context},
+        {"role": "system", "content": _build_system_prompt() + context},
         {"role": "user", "content": message},
     ]
 

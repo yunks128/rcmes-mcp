@@ -17,6 +17,7 @@ import xarray as xr
 from rcmes_mcp.server import mcp
 from rcmes_mcp.utils.cache import result_cache
 from rcmes_mcp.utils.cloud import (
+    CMIP6_MODEL_INFO,
     CMIP6_MODELS,
     CMIP6_SCENARIOS,
     CMIP6_VARIABLES,
@@ -27,6 +28,11 @@ from rcmes_mcp.utils.cloud import (
     validate_variable,
 )
 from rcmes_mcp.utils.session import session_manager
+
+import threading
+
+# Thread-local storage for progress callback (avoids polluting MCP tool signatures)
+_thread_local = threading.local()
 
 
 def _get_subset_cache_key(
@@ -105,10 +111,16 @@ def list_available_models(
     # If scenario specified, could filter models that have data for that scenario
     # For now, all models have all scenarios
 
+    models_with_info = [
+        {"name": m, "description": CMIP6_MODEL_INFO.get(m, "")}
+        for m in models
+    ]
+
     return {
         "dataset": dataset,
         "model_count": len(models),
         "models": models,
+        "models_info": models_with_info,
         "scenarios_available": list(CMIP6_SCENARIOS.keys()),
         "note": "All models are available for all scenarios (historical, ssp126, ssp245, ssp370, ssp585)",
     }
@@ -348,6 +360,7 @@ def load_climate_data(
             ds = cached_ds
         else:
             # Open dataset from S3 with early spatial subsetting
+            progress_cb = getattr(_thread_local, 'progress_callback', None)
             ds = open_nex_gddp_dataset(
                 variable=variable,
                 model=model,
@@ -356,6 +369,7 @@ def load_climate_data(
                 end_year=end_year,
                 lat_bounds=(lat_min, lat_max),
                 lon_bounds=lon_bounds_arg,
+                progress_callback=progress_cb,
             )
 
             # Subset by time

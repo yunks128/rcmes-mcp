@@ -163,7 +163,7 @@ def calculate_etccdi_index(
     if isinstance(ds, xr.DataArray):
         data = ds
     else:
-        var_name = metadata.variable or list(ds.data_vars)[0]
+        var_name = metadata.variable if (metadata.variable and metadata.variable in ds.data_vars) else list(ds.data_vars)[0]
         data = ds[var_name]
 
     # Ensure proper units for xclim
@@ -324,7 +324,7 @@ def analyze_heatwaves(
     if isinstance(ds, xr.DataArray):
         tasmax = ds
     else:
-        var_name = metadata.variable or list(ds.data_vars)[0]
+        var_name = metadata.variable if (metadata.variable and metadata.variable in ds.data_vars) else list(ds.data_vars)[0]
         tasmax = ds[var_name]
 
     try:
@@ -555,7 +555,7 @@ def calculate_growing_degree_days(
     if isinstance(ds, xr.DataArray):
         tas = ds
     else:
-        var_name = metadata.variable or list(ds.data_vars)[0]
+        var_name = metadata.variable if (metadata.variable and metadata.variable in ds.data_vars) else list(ds.data_vars)[0]
         tas = ds[var_name]
 
     try:

@@ -1,0 +1,61 @@
+name: Bug Report
+description: Report a bug to help us improve
+title: "[Bug]: "
+labels: "bug"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > _Thanks for filing a bug report. Please answer a few questions to help us investigate._
+  - type: dropdown
+    id: checked-for-duplicates
+    attributes:
+      label: Checked for duplicates
+      description: Have you checked for duplicate issue tickets?
+      multiple: false
+      options:
+        - "Yes - I've already checked"
+        - "No - I haven't checked"
+    validations:
+      required: yes
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what the bug is.
+      placeholder: Tell us what you saw
+      value: "When I did [...] action, I noticed [...]"
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: What did you expect?
+      description: A clear and concise description of what you expected to happen.
+      placeholder: Tell us what you expected
+      value: "I expected [...]"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproducible steps
+      description: "How would we reproduce this bug? Please walk us through it step by step."
+      value: |
+        1.
+        2.
+        3.
+        ...
+      render: bash
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: "What is your environment?"
+      value: |
+        - RCMES-MCP version: [e.g. v0.1.0]
+        - Python version: [e.g. 3.11]
+        - Operating System: [e.g. Ubuntu 22.04]
+        - Browser (if using Web UI): [e.g. Chrome 120]
+        ...
+      render: bash

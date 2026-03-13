@@ -464,18 +464,51 @@ def calculate_anomaly(
 def get_country_bounds(country_name: str) -> dict:
     """Get the bounding box (lat/lon) for a country."""
     gdf = _get_country_boundaries()
+    search = country_name.lower()
+
+    # Exact match first
     for col in ["NAME", "name", "ADMIN", "admin"]:
         if col in gdf.columns:
-            match = gdf[gdf[col].str.lower() == country_name.lower()]
+            match = gdf[gdf[col].str.lower() == search]
             if not match.empty:
                 bounds = match.geometry.union_all().bounds  # (minx, miny, maxx, maxy)
+                matched_name = match.iloc[0][col]
                 return {
-                    "country": country_name,
+                    "country": matched_name,
                     "lat_min": bounds[1],
                     "lat_max": bounds[3],
                     "lon_min": bounds[0],
                     "lon_max": bounds[2],
                 }
+
+    # Partial/contains match
+    for col in ["NAME", "name", "ADMIN", "admin"]:
+        if col in gdf.columns:
+            match = gdf[gdf[col].str.lower().str.contains(search, na=False)]
+            if len(match) > 1:
+                # Multiple matches — return them so the caller can disambiguate
+                names = match[col].tolist()
+                return {
+                    "ambiguous": True,
+                    "query": country_name,
+                    "matches": names,
+                    "message": (
+                        f"'{country_name}' matches multiple countries: "
+                        + ", ".join(names)
+                        + ". Please specify which one."
+                    ),
+                }
+            if not match.empty:
+                bounds = match.geometry.union_all().bounds
+                matched_name = match.iloc[0][col]
+                return {
+                    "country": matched_name,
+                    "lat_min": bounds[1],
+                    "lat_max": bounds[3],
+                    "lon_min": bounds[0],
+                    "lon_max": bounds[2],
+                }
+
     raise ValueError(f"Country '{country_name}' not found")
 
 

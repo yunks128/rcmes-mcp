@@ -11,9 +11,18 @@ import os
 from functools import lru_cache
 from typing import Any
 
+import tempfile
+from pathlib import Path
+
 import fsspec
 import s3fs
 import xarray as xr
+
+# Local file cache directory for downloaded S3 files
+_FILE_CACHE_DIR = Path(os.environ.get(
+    "RCMES_CACHE_DIR",
+    os.path.join(tempfile.gettempdir(), "rcmes_mcp_cache"),
+)) / "s3_files"
 
 # NEX-GDDP-CMIP6 dataset configuration
 NEX_GDDP_CMIP6_BUCKET = "nex-gddp-cmip6"
@@ -22,43 +31,46 @@ NEX_GDDP_CMIP6_REGION = "us-west-2"
 # THREDDS endpoints
 NCCS_THREDDS_BASE = "https://ds.nccs.nasa.gov/thredds"
 
-# Available models in NEX-GDDP-CMIP6
-CMIP6_MODELS = [
-    "ACCESS-CM2",
-    "ACCESS-ESM1-5",
-    "BCC-CSM2-MR",
-    "CanESM5",
-    "CESM2",
-    "CESM2-WACCM",
-    "CMCC-CM2-SR5",
-    "CMCC-ESM2",
-    "CNRM-CM6-1",
-    "CNRM-ESM2-1",
-    "EC-Earth3",
-    "EC-Earth3-Veg-LR",
-    "FGOALS-g3",
-    "GFDL-CM4",
-    "GFDL-ESM4",
-    "GISS-E2-1-G",
-    "HadGEM3-GC31-LL",
-    "HadGEM3-GC31-MM",
-    "IITM-ESM",
-    "INM-CM4-8",
-    "INM-CM5-0",
-    "IPSL-CM6A-LR",
-    "KACE-1-0-G",
-    "KIOST-ESM",
-    "MIROC6",
-    "MIROC-ES2L",
-    "MPI-ESM1-2-HR",
-    "MPI-ESM1-2-LR",
-    "MRI-ESM2-0",
-    "NESM3",
-    "NorESM2-LM",
-    "NorESM2-MM",
-    "TaiESM1",
-    "UKESM1-0-LL",
-]
+# Available models in NEX-GDDP-CMIP6 with descriptions
+CMIP6_MODEL_INFO = {
+    "ACCESS-CM2": "CSIRO-ARCCSS, Australia — coupled climate model",
+    "ACCESS-ESM1-5": "CSIRO, Australia — earth system model with biogeochemistry",
+    "BCC-CSM2-MR": "Beijing Climate Center, China — medium-resolution coupled model",
+    "CanESM5": "CCCma, Canada — Canadian Earth System Model",
+    "CESM2": "NCAR, USA — Community Earth System Model",
+    "CESM2-WACCM": "NCAR, USA — CESM2 with whole atmosphere community climate model",
+    "CMCC-CM2-SR5": "CMCC, Italy — coupled climate model",
+    "CMCC-ESM2": "CMCC, Italy — earth system model with carbon cycle",
+    "CNRM-CM6-1": "CNRM/Météo-France, France — coupled climate model",
+    "CNRM-ESM2-1": "CNRM/Météo-France, France — earth system model",
+    "EC-Earth3": "EC-Earth Consortium, Europe — multi-institutional climate model",
+    "EC-Earth3-Veg-LR": "EC-Earth Consortium, Europe — with dynamic vegetation, low resolution",
+    "FGOALS-g3": "CAS/IAP, China — Flexible Global Ocean-Atmosphere-Land System",
+    "GFDL-CM4": "NOAA/GFDL, USA — coupled climate model",
+    "GFDL-ESM4": "NOAA/GFDL, USA — earth system model with atmospheric chemistry",
+    "GISS-E2-1-G": "NASA/GISS, USA — Goddard Institute for Space Studies model",
+    "HadGEM3-GC31-LL": "Met Office, UK — Hadley Centre model, low resolution",
+    "HadGEM3-GC31-MM": "Met Office, UK — Hadley Centre model, medium resolution",
+    "IITM-ESM": "IITM, India — Indian Institute of Tropical Meteorology ESM",
+    "INM-CM4-8": "INM, Russia — Institute for Numerical Mathematics model",
+    "INM-CM5-0": "INM, Russia — Institute for Numerical Mathematics model v5",
+    "IPSL-CM6A-LR": "IPSL, France — Institut Pierre-Simon Laplace model",
+    "KACE-1-0-G": "NIMS/KMA, South Korea — Korean coupled climate model",
+    "KIOST-ESM": "KIOST, South Korea — Korea Institute of Ocean Science & Technology ESM",
+    "MIROC6": "JAMSTEC/U. Tokyo, Japan — coupled climate model",
+    "MIROC-ES2L": "JAMSTEC/U. Tokyo, Japan — earth system model, low resolution",
+    "MPI-ESM1-2-HR": "MPI-M, Germany — Max Planck Institute model, high resolution",
+    "MPI-ESM1-2-LR": "MPI-M, Germany — Max Planck Institute model, low resolution",
+    "MRI-ESM2-0": "MRI/JMA, Japan — Meteorological Research Institute ESM",
+    "NESM3": "NUIST, China — Nanjing University earth system model",
+    "NorESM2-LM": "NCC, Norway — Norwegian Earth System Model, low-medium res",
+    "NorESM2-MM": "NCC, Norway — Norwegian Earth System Model, medium res",
+    "TaiESM1": "RCEC/AS, Taiwan — Taiwan Earth System Model",
+    "UKESM1-0-LL": "Met Office/NERC, UK — UK Earth System Model",
+}
+
+# List of model names for backward compatibility
+CMIP6_MODELS = list(CMIP6_MODEL_INFO.keys())
 
 # Available scenarios
 CMIP6_SCENARIOS = {
@@ -157,6 +169,7 @@ def open_nex_gddp_dataset(
     chunks: dict[str, int] | None = None,
     lat_bounds: tuple[float, float] | None = None,
     lon_bounds: tuple[float, float] | None = None,
+    progress_callback: Any | None = None,
 ) -> xr.Dataset:
     """
     Open NEX-GDDP-CMIP6 dataset from S3.
@@ -233,56 +246,67 @@ def open_nex_gddp_dataset(
         "default_cache_type": "readahead",
     }
 
-    # Open files using fsspec file objects to avoid h5netcdf dimension scale issues
-    import h5netcdf
+    # Download and open files in parallel for much faster loading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     fs = get_s3_filesystem()
-    datasets = []
+    total_files = len(file_urls)
 
-    for url in file_urls:
-        # Remove s3:// prefix for fsspec
+    # Ensure cache directory exists
+    _FILE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _get_cached_path(s3_path: str) -> Path:
+        """Get the local cache file path for an S3 path."""
+        # Preserve the S3 path structure: model/scenario/ensemble/variable/file.nc
+        relative = s3_path.replace(f"{NEX_GDDP_CMIP6_BUCKET}/", "", 1)
+        return _FILE_CACHE_DIR / relative
+
+    def _download_one(idx_and_url: tuple[int, str]) -> tuple[int, xr.Dataset]:
+        """Download a single file (or load from cache) and return (index, dataset)."""
+        idx, url = idx_and_url
         s3_path = url.replace("s3://", "")
+        local_path = _get_cached_path(s3_path)
 
-        try:
-            # Open file with fsspec and pass to xarray
-            with fs.open(s3_path, 'rb') as f:
-                # Read file into memory for small files, or use h5netcdf directly
-                import h5py
-                import io
-
-                # For remote files, we need to read into a buffer
-                file_bytes = f.read()
-                buffer = io.BytesIO(file_bytes)
-
-                ds_single = xr.open_dataset(
-                    buffer,
-                    engine="h5netcdf",
-                    chunks=chunks,
-                )
-
-                # Select only the variable we need
-                if variable in ds_single.data_vars:
-                    ds_single = ds_single[[variable]]
-
-                datasets.append(ds_single)
-        except Exception as e:
-            # Try alternative: use scipy engine with downloaded temp file
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix='.nc', delete=False) as tmp:
-                tmp.write(fs.open(s3_path, 'rb').read())
-                tmp_path = tmp.name
-
-            ds_single = xr.open_dataset(tmp_path, chunks=chunks)
+        # Use cached file if it exists
+        if local_path.exists() and local_path.stat().st_size > 0:
+            ds_single = xr.open_dataset(local_path, engine="h5netcdf", chunks=chunks)
             if variable in ds_single.data_vars:
                 ds_single = ds_single[[variable]]
-            datasets.append(ds_single)
+            return (idx, ds_single)
 
-            # Clean up temp file
-            import os
-            try:
-                os.unlink(tmp_path)
-            except:
-                pass
+        # Download from S3 and save to cache
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = local_path.with_suffix('.nc.tmp')
+        try:
+            with fs.open(s3_path, 'rb') as f:
+                file_bytes = f.read()
+            tmp_path.write_bytes(file_bytes)
+            tmp_path.rename(local_path)  # atomic rename
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+        ds_single = xr.open_dataset(local_path, engine="h5netcdf", chunks=chunks)
+        if variable in ds_single.data_vars:
+            ds_single = ds_single[[variable]]
+        return (idx, ds_single)
+
+    results: dict[int, xr.Dataset] = {}
+    max_workers = min(total_files, 6)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_download_one, (i, url)): i
+            for i, url in enumerate(file_urls)
+        }
+        for future in as_completed(futures):
+            idx, ds_single = future.result()
+            results[idx] = ds_single
+            if progress_callback is not None:
+                progress_callback(len(results), total_files, file_urls[idx].split("/")[-1])
+
+    # Reconstruct in original order
+    datasets = [results[i] for i in sorted(results.keys())]
 
     if not datasets:
         raise FileNotFoundError(f"Could not open any data files for {variable}")
