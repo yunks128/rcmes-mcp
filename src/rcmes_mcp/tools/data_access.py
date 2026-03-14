@@ -8,11 +8,15 @@ including NEX-GDDP-CMIP6 on AWS S3.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
+import time
 from datetime import timedelta
 from pathlib import Path
 
 import xarray as xr
+
+logger = logging.getLogger("rcmes.tools.data_access")
 
 from rcmes_mcp.server import mcp
 from rcmes_mcp.utils.cache import result_cache
@@ -306,6 +310,13 @@ def load_climate_data(
             lon_max=-114.0
         )
     """
+    logger.info(
+        "load_climate_data called",
+        extra={"tool": "load_climate_data", "variable": variable,
+               "model": model, "scenario": scenario},
+    )
+    t0 = time.perf_counter()
+
     if dataset != "NEX-GDDP-CMIP6":
         return {"error": f"Dataset '{dataset}' not yet supported."}
 
@@ -392,6 +403,15 @@ def load_climate_data(
         lat_size = ds.dims.get("lat", 0)
         lon_size = ds.dims.get("lon", 0)
 
+        duration_ms = round((time.perf_counter() - t0) * 1000, 1)
+        logger.info(
+            f"Loaded {variable}/{model}/{scenario} → {dataset_id} "
+            f"({time_size}×{lat_size}×{lon_size}) in {duration_ms}ms",
+            extra={"tool": "load_climate_data", "dataset_id": dataset_id,
+                   "variable": variable, "model": model, "scenario": scenario,
+                   "duration_ms": duration_ms},
+        )
+
         return {
             "success": True,
             "dataset_id": dataset_id,
@@ -414,8 +434,10 @@ def load_climate_data(
         }
 
     except FileNotFoundError as e:
+        logger.error(f"Data not found: {e}", extra={"tool": "load_climate_data", "error": str(e)})
         return {"error": str(e)}
     except Exception as e:
+        logger.exception(f"Failed to load data: {e}", extra={"tool": "load_climate_data", "error": str(e)})
         return {"error": f"Failed to load data: {str(e)}"}
 
 

@@ -7,12 +7,17 @@ and model evaluation metrics.
 
 from __future__ import annotations
 
+import logging
+import time
+
 import numpy as np
 import xarray as xr
 from scipy import stats
 
 from rcmes_mcp.server import mcp
 from rcmes_mcp.utils.session import session_manager
+
+logger = logging.getLogger("rcmes.tools.analysis")
 
 
 @mcp.tool()
@@ -94,8 +99,10 @@ def calculate_statistics(
                 }
 
     except Exception as e:
+        logger.exception(f"calculate_statistics failed for {dataset_id}", extra={"tool": "calculate_statistics", "error": str(e)})
         return {"error": f"Failed to compute statistics: {str(e)}"}
 
+    logger.info(f"calculate_statistics {dataset_id} → {statistic}", extra={"tool": "calculate_statistics", "dataset_id": dataset_id})
     return results
 
 
@@ -233,7 +240,13 @@ def calculate_trend(
         ci_95 = 1.96 * std_err * steps_per_decade
 
     except Exception as e:
+        logger.exception(f"calculate_trend failed for {dataset_id}", extra={"tool": "calculate_trend", "error": str(e)})
         return {"error": f"Failed to calculate trend: {str(e)}"}
+
+    logger.info(
+        f"calculate_trend {dataset_id}: {slope_per_decade:.3f}/decade, p={p_value:.4f}",
+        extra={"tool": "calculate_trend", "dataset_id": dataset_id},
+    )
 
     return {
         "dataset_id": dataset_id,

@@ -7,12 +7,16 @@ climate indicators using xclim.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import xarray as xr
 
 from rcmes_mcp.server import mcp
 from rcmes_mcp.utils.session import session_manager
 from rcmes_mcp.utils.validation import validate_date_range
+
+logger = logging.getLogger("rcmes.tools.indices")
 
 # ETCCDI indices documentation
 TEMPERATURE_INDICES = {
@@ -270,6 +274,7 @@ def calculate_etccdi_index(
             }
 
     except Exception as e:
+        logger.exception(f"calculate_etccdi_index {index} failed for {dataset_id}", extra={"tool": "calculate_etccdi_index", "error": str(e)})
         return {"error": f"Failed to calculate {index}: {str(e)}"}
 
     new_id = session_manager.store(
@@ -280,6 +285,8 @@ def calculate_etccdi_index(
         scenario=metadata.scenario,
         description=f"{index_upper} index calculated from {dataset_id}",
     )
+
+    logger.info(f"calculate_etccdi_index {index_upper} from {dataset_id} → {new_id}", extra={"tool": "calculate_etccdi_index", "dataset_id": new_id})
 
     return {
         "success": True,
@@ -395,6 +402,7 @@ def analyze_heatwaves(
         mean_hot_days = float(hot_days.resample(time="YS").sum().mean().compute())
 
     except Exception as e:
+        logger.exception(f"analyze_heatwaves failed for {dataset_id}", extra={"tool": "analyze_heatwaves", "error": str(e)})
         return {"error": f"Failed to analyze heatwaves: {str(e)}"}
 
     new_id = session_manager.store(
@@ -405,6 +413,8 @@ def analyze_heatwaves(
         scenario=metadata.scenario,
         description=f"Heatwave analysis of {dataset_id}",
     )
+
+    logger.info(f"analyze_heatwaves {dataset_id} → {new_id}", extra={"tool": "analyze_heatwaves", "dataset_id": new_id})
 
     return {
         "success": True,

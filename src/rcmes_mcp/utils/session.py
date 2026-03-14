@@ -8,12 +8,15 @@ and cached for the duration of the session to avoid repeated I/O.
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
 import xarray as xr
+
+logger = logging.getLogger("rcmes.session")
 
 
 @dataclass
@@ -105,6 +108,12 @@ class SessionManager:
             description=description,
         )
 
+        logger.debug(
+            f"Stored {dataset_id} ({variable}, {model}, {scenario}) — "
+            f"{len(self._datasets)} datasets in session",
+            extra={"dataset_id": dataset_id, "variable": variable},
+        )
+
         return dataset_id
 
     def get(self, dataset_id: str) -> xr.Dataset | xr.DataArray:
@@ -153,6 +162,8 @@ class SessionManager:
         ]
         for ds_id in expired:
             self.delete(ds_id)
+        if expired:
+            logger.info(f"Cleaned up {len(expired)} expired datasets: {expired}")
         return len(expired)
 
     def clear(self) -> None:

@@ -7,10 +7,14 @@ subsetting, regridding, unit conversions, and country masking.
 
 from __future__ import annotations
 
+import logging
+import time
 from pathlib import Path
 
 import numpy as np
 import xarray as xr
+
+logger = logging.getLogger("rcmes.tools.processing")
 
 from rcmes_mcp.server import mcp
 from rcmes_mcp.utils.session import session_manager
@@ -97,6 +101,11 @@ def temporal_subset(
         description=f"Temporal subset of {dataset_id}: {start_date} to {end_date}",
     )
 
+    logger.info(
+        f"temporal_subset {dataset_id} → {new_id} ({start_date} to {end_date})",
+        extra={"tool": "temporal_subset", "dataset_id": new_id},
+    )
+
     return {
         "success": True,
         "dataset_id": new_id,
@@ -150,6 +159,12 @@ def spatial_subset(
         model=metadata.model,
         scenario=metadata.scenario,
         description=f"Spatial subset of {dataset_id}",
+    )
+
+    logger.info(
+        f"spatial_subset {dataset_id} → {new_id} "
+        f"(lat={lat_min:.1f}:{lat_max:.1f}, lon={lon_min:.1f}:{lon_max:.1f})",
+        extra={"tool": "spatial_subset", "dataset_id": new_id},
     )
 
     return {

@@ -11,11 +11,15 @@ import base64
 import hashlib
 import io
 import json
+import logging
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
 import xarray as xr
+
+logger = logging.getLogger("rcmes.tools.visualization")
 
 from rcmes_mcp.server import mcp
 from rcmes_mcp.utils.session import session_manager
@@ -106,6 +110,8 @@ def generate_map(
     Returns:
         Dictionary with base64-encoded image and file path
     """
+    t0 = time.perf_counter()
+
     # Check plot cache
     cache_key = _plot_cache_key(
         func="map", dataset_id=dataset_id, time_index=time_index,
@@ -113,6 +119,7 @@ def generate_map(
     )
     cached = _get_cached_plot(cache_key)
     if cached:
+        logger.debug(f"generate_map {dataset_id} served from cache", extra={"tool": "generate_map", "dataset_id": dataset_id})
         return cached
 
     try:
@@ -230,9 +237,13 @@ def generate_map(
         _cache_plot(cache_key, fig, result)
         plt.close(fig)
 
+        duration_ms = round((time.perf_counter() - t0) * 1000, 1)
+        logger.info(f"generate_map {dataset_id} in {duration_ms}ms", extra={"tool": "generate_map", "dataset_id": dataset_id, "duration_ms": duration_ms})
+
         return result
 
     except Exception as e:
+        logger.exception(f"generate_map failed for {dataset_id}", extra={"tool": "generate_map", "error": str(e)})
         return {"error": f"Failed to generate map: {str(e)}"}
 
 
@@ -259,6 +270,8 @@ def generate_timeseries_plot(
     """
     if not dataset_ids:
         return {"error": "No dataset IDs provided"}
+
+    t0 = time.perf_counter()
 
     # Check plot cache
     cache_key = _plot_cache_key(
@@ -363,9 +376,13 @@ def generate_timeseries_plot(
         _cache_plot(cache_key, fig, result)
         plt.close(fig)
 
+        duration_ms = round((time.perf_counter() - t0) * 1000, 1)
+        logger.info(f"generate_timeseries_plot {dataset_ids} in {duration_ms}ms", extra={"tool": "generate_timeseries_plot", "duration_ms": duration_ms})
+
         return result
 
     except Exception as e:
+        logger.exception(f"generate_timeseries_plot failed", extra={"tool": "generate_timeseries_plot", "error": str(e)})
         return {"error": f"Failed to generate time series plot: {str(e)}"}
 
 

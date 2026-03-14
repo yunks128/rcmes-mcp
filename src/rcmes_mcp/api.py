@@ -34,11 +34,15 @@ import io
 import xarray as xr
 
 from rcmes_mcp.utils.session import session_manager
+from rcmes_mcp.utils.logging_config import configure_logging
+
+# Initialize logging before anything else
+configure_logging()
 
 # Import RCMES tools
 from rcmes_mcp.tools import analysis, code_execution, data_access, indices, processing, visualization
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("rcmes.api")
 
 app = FastAPI(
     title="RCMES Climate API",
@@ -63,6 +67,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Request logging middleware (added first so it wraps everything)
+from rcmes_mcp.middleware.request_logging import RequestLoggingMiddleware
+
+app.add_middleware(RequestLoggingMiddleware)
 
 # Rate limiting middleware
 from rcmes_mcp.middleware.rate_limit import RateLimitMiddleware
@@ -400,7 +409,6 @@ async def visualize(request: VisualizationRequest) -> dict[str, Any]:
 
     # Resolve dataset IDs: prefer dataset_ids list, fall back to single dataset_id
     ids = request.dataset_ids or ([request.dataset_id] if request.dataset_id else [])
-    print(f"[visualize] viz_type={viz_type}, dataset_ids={ids}, labels={request.labels}")
     if not ids:
         raise HTTPException(status_code=400, detail="No dataset_id or dataset_ids provided")
 
@@ -1612,9 +1620,14 @@ async def chat(request: ChatRequest) -> dict[str, Any]:
 
 
 @app.get("/api/health")
-async def health_check() -> dict[str, str]:
-    """Health check endpoint."""
-    return {"status": "healthy", "service": "rcmes-api"}
+async def health_check() -> dict[str, Any]:
+    """Health check endpoint with session stats."""
+    datasets = session_manager.list_datasets()
+    return {
+        "status": "healthy",
+        "service": "rcmes-api",
+        "datasets_loaded": len(datasets),
+    }
 
 
 # ============================================================================
