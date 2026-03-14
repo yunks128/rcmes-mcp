@@ -166,7 +166,7 @@ def open_nex_gddp_dataset(
     scenario: str,
     start_year: int | None = None,
     end_year: int | None = None,
-    chunks: dict[str, int] | None = None,
+    chunks: dict[str, int] | None = {},
     lat_bounds: tuple[float, float] | None = None,
     lon_bounds: tuple[float, float] | None = None,
     progress_callback: Any | None = None,
@@ -190,134 +190,41 @@ def open_nex_gddp_dataset(
     Returns:
         xarray Dataset with lazy-loaded data
     """
-    # Optimized chunk sizes - smaller chunks for regional queries
-    # which is the most common use case
-    if chunks is None:
-        # If we have spatial bounds, use smaller spatial chunks for efficiency
-        if lat_bounds or lon_bounds:
-            chunks = {"time": 365, "lat": 50, "lon": 50}
-        else:
-            chunks = {"time": 365, "lat": 100, "lon": 100}
+    ref_url = f"s3://carbonplan-share/nasa-nex-reference/references_prod/{model}_{scenario}/reference.parquet"
 
-    fs = get_s3_filesystem()
-    base_path = build_nex_gddp_path(variable, model, scenario)
-
-    # Get list of files
-    files = fs.glob(f"{base_path}/*.nc")
-
-    if not files:
-        raise FileNotFoundError(
-            f"No data found for {model}/{scenario}/{variable}. "
-            f"Check that the model and scenario are available."
-        )
-
-    # Filter by year if specified
-    if start_year or end_year:
-        filtered_files = []
-        for f in files:
-            # Extract year from filename
-            try:
-                year = int(f.split("_")[-1].replace(".nc", ""))
-                if start_year and year < start_year:
-                    continue
-                if end_year and year > end_year:
-                    continue
-                filtered_files.append(f)
-            except ValueError:
-                continue
-        files = filtered_files
-
-    if not files:
-        raise FileNotFoundError(
-            f"No data found for {model}/{scenario}/{variable} "
-            f"in year range {start_year}-{end_year}"
-        )
-
-    # Sort files for consistent ordering (helps with caching)
-    files = sorted(files)
-
-    # Open multi-file dataset with optimized settings
-    file_urls = [f"s3://{f}" for f in files]
-
-    # Use fsspec's caching for file handles
     storage_options = {
-        "anon": True,
-        "default_block_size": 8 * 1024 * 1024,  # 8MB blocks
-        "default_cache_type": "readahead",
+        'anon': True,
+        'remote_protocol': 's3',
+        'remote_options': {'anon': True, 'asynchronous': True},
+        'target_protocol': 's3',
+        'target_options': {'anon': True}
     }
 
-    # Download and open files in parallel for much faster loading
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    ds = xr.open_dataset(
+        ref_url,
+        engine="kerchunk",
+        storage_options=storage_options,
+        chunks=chunks  
+    )
 
-    fs = get_s3_filesystem()
-    total_files = len(file_urls)
+    # 1. Variable selection (Lazy)
+    if variable in ds.data_vars:
+        ds = ds[[variable]]
 
-    # Ensure cache directory exists
-    _FILE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    # 2. Temporal slice (Lazy)
+    if start_year or end_year:
+        time_slice = slice(
+            str(start_year) if start_year else None,
+            str(end_year) if end_year else None
+        )
+        ds = ds.sel(time=time_slice)
 
-    def _get_cached_path(s3_path: str) -> Path:
-        """Get the local cache file path for an S3 path."""
-        # Preserve the S3 path structure: model/scenario/ensemble/variable/file.nc
-        relative = s3_path.replace(f"{NEX_GDDP_CMIP6_BUCKET}/", "", 1)
-        return _FILE_CACHE_DIR / relative
+    # 3. Spatial subset (Lazy)
+    # This is critical when chunks=None. It ensures that when you 
+    # eventually do call .load(), you only pull the regional bytes.
+    ds = _apply_spatial_subset(ds, lat_bounds, lon_bounds)
 
-    def _download_one(idx_and_url: tuple[int, str]) -> tuple[int, xr.Dataset]:
-        """Download a single file (or load from cache) and return (index, dataset)."""
-        idx, url = idx_and_url
-        s3_path = url.replace("s3://", "")
-        local_path = _get_cached_path(s3_path)
-
-        # Use cached file if it exists
-        if local_path.exists() and local_path.stat().st_size > 0:
-            ds_single = xr.open_dataset(local_path, engine="h5netcdf", chunks=chunks)
-            if variable in ds_single.data_vars:
-                ds_single = ds_single[[variable]]
-            return (idx, ds_single)
-
-        # Download from S3 and save to cache
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = local_path.with_suffix('.nc.tmp')
-        try:
-            with fs.open(s3_path, 'rb') as f:
-                file_bytes = f.read()
-            tmp_path.write_bytes(file_bytes)
-            tmp_path.rename(local_path)  # atomic rename
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
-
-        ds_single = xr.open_dataset(local_path, engine="h5netcdf", chunks=chunks)
-        if variable in ds_single.data_vars:
-            ds_single = ds_single[[variable]]
-        return (idx, ds_single)
-
-    results: dict[int, xr.Dataset] = {}
-    max_workers = min(total_files, 6)
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(_download_one, (i, url)): i
-            for i, url in enumerate(file_urls)
-        }
-        for future in as_completed(futures):
-            idx, ds_single = future.result()
-            results[idx] = ds_single
-            if progress_callback is not None:
-                progress_callback(len(results), total_files, file_urls[idx].split("/")[-1])
-
-    # Reconstruct in original order
-    datasets = [results[i] for i in sorted(results.keys())]
-
-    if not datasets:
-        raise FileNotFoundError(f"Could not open any data files for {variable}")
-
-    # Concatenate all datasets along time dimension
-    if len(datasets) == 1:
-        ds = datasets[0]
-    else:
-        ds = xr.concat(datasets, dim="time")
-
-    return _apply_spatial_subset(ds, lat_bounds, lon_bounds)
+    return ds
 
 
 def _apply_spatial_subset(
