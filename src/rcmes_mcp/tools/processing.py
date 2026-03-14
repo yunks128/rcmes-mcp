@@ -14,6 +14,7 @@ import xarray as xr
 
 from rcmes_mcp.server import mcp
 from rcmes_mcp.utils.session import session_manager
+from rcmes_mcp.utils.validation import validate_date_range, validate_lat_lon_bounds
 
 # Module-level cache for country polygons
 _country_polygons_gdf = None
@@ -72,6 +73,11 @@ def temporal_subset(
         New dataset_id for the subsetted data
     """
     try:
+        start_date, end_date = validate_date_range(start_date, end_date)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    try:
         ds = session_manager.get(dataset_id)
         metadata = session_manager.get_metadata(dataset_id)
     except KeyError as e:
@@ -121,6 +127,11 @@ def spatial_subset(
     Returns:
         New dataset_id for the subsetted data
     """
+    try:
+        validate_lat_lon_bounds(lat_min, lat_max, lon_min, lon_max)
+    except ValueError as e:
+        return {"error": str(e)}
+
     try:
         ds = session_manager.get(dataset_id)
         metadata = session_manager.get_metadata(dataset_id)
@@ -421,6 +432,11 @@ def calculate_anomaly(
     Returns:
         New dataset_id containing anomaly values
     """
+    try:
+        baseline_start, baseline_end = validate_date_range(baseline_start, baseline_end)
+    except ValueError as e:
+        return {"error": str(e)}
+
     try:
         ds = session_manager.get(dataset_id)
         metadata = session_manager.get_metadata(dataset_id)

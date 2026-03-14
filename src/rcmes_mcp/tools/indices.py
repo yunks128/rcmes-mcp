@@ -12,6 +12,7 @@ import xarray as xr
 
 from rcmes_mcp.server import mcp
 from rcmes_mcp.utils.session import session_manager
+from rcmes_mcp.utils.validation import validate_date_range
 
 # ETCCDI indices documentation
 TEMPERATURE_INDICES = {
@@ -326,6 +327,12 @@ def analyze_heatwaves(
     else:
         var_name = metadata.variable if (metadata.variable and metadata.variable in ds.data_vars) else list(ds.data_vars)[0]
         tasmax = ds[var_name]
+
+    if baseline_start and baseline_end:
+        try:
+            baseline_start, baseline_end = validate_date_range(baseline_start, baseline_end)
+        except ValueError as e:
+            return {"error": str(e)}
 
     try:
         # Calculate threshold

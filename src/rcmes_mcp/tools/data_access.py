@@ -28,6 +28,7 @@ from rcmes_mcp.utils.cloud import (
     validate_variable,
 )
 from rcmes_mcp.utils.session import session_manager
+from rcmes_mcp.utils.validation import validate_date_range, validate_lat_lon_bounds
 
 import threading
 
@@ -318,22 +319,20 @@ def load_climate_data(
     if not validate_variable(variable):
         return {"error": f"Variable '{variable}' not found.", "available_variables": list(CMIP6_VARIABLES.keys())}
 
-    # Parse dates and extract years
+    # Validate dates and coordinates
     try:
-        start_year = int(start_date.split("-")[0])
-        end_year = int(end_date.split("-")[0])
-    except (ValueError, IndexError):
-        return {"error": "Invalid date format. Use YYYY-MM-DD."}
+        start_date, end_date = validate_date_range(start_date, end_date)
+    except ValueError as e:
+        return {"error": str(e)}
 
-    # Validate coordinate ranges
-    if not (-60 <= lat_min <= 90 and -60 <= lat_max <= 90):
-        return {"error": "Latitude must be between -60 and 90."}
-    if not (-180 <= lon_min <= 180 and -180 <= lon_max <= 180):
-        return {"error": "Longitude must be between -180 and 180."}
-    if lat_min >= lat_max:
-        return {"error": "lat_min must be less than lat_max."}
-    if lon_min >= lon_max:
-        return {"error": "lon_min must be less than lon_max."}
+    try:
+        validate_lat_lon_bounds(lat_min, lat_max, lon_min, lon_max)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    # Extract years for S3 file selection
+    start_year = int(start_date.split("-")[0])
+    end_year = int(end_date.split("-")[0])
 
     # Convert longitude from -180/180 to 0-360 (dataset uses 0-360)
     lon_min_360 = lon_min if lon_min >= 0 else 360 + lon_min

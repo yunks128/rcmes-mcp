@@ -29,7 +29,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 import io
 import xarray as xr
 
@@ -64,6 +64,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Rate limiting middleware
+from rcmes_mcp.middleware.rate_limit import RateLimitMiddleware
+
+app.add_middleware(RateLimitMiddleware)
+
 
 # ============================================================================
 # Request/Response Models
@@ -76,10 +81,17 @@ class LoadDataRequest(BaseModel):
     scenario: str = Field(..., description="Emissions scenario (e.g., ssp585)")
     start_date: str = Field(..., description="Start date (YYYY-MM-DD)")
     end_date: str = Field(..., description="End date (YYYY-MM-DD)")
-    lat_min: float = Field(..., ge=-90, le=90)
-    lat_max: float = Field(..., ge=-90, le=90)
+    lat_min: float = Field(..., ge=-60, le=90)
+    lat_max: float = Field(..., ge=-60, le=90)
     lon_min: float = Field(..., ge=-180, le=180)
     lon_max: float = Field(..., ge=-180, le=180)
+
+    @model_validator(mode="after")
+    def check_ranges(self):
+        from rcmes_mcp.utils.validation import validate_date_range, validate_lat_lon_bounds
+        validate_date_range(self.start_date, self.end_date)
+        validate_lat_lon_bounds(self.lat_min, self.lat_max, self.lon_min, self.lon_max)
+        return self
 
 
 class AnalysisRequest(BaseModel):
@@ -101,17 +113,26 @@ class VisualizationRequest(BaseModel):
 
 class SubsetRequest(BaseModel):
     dataset_id: str
-    lat_min: float | None = None
-    lat_max: float | None = None
-    lon_min: float | None = None
-    lon_max: float | None = None
+    lat_min: float | None = Field(None, ge=-60, le=90)
+    lat_max: float | None = Field(None, ge=-60, le=90)
+    lon_min: float | None = Field(None, ge=-180, le=180)
+    lon_max: float | None = Field(None, ge=-180, le=180)
     start_date: str | None = None
     end_date: str | None = None
+
+    @model_validator(mode="after")
+    def check_ranges(self):
+        from rcmes_mcp.utils.validation import validate_date_range, validate_lat_lon_bounds
+        if self.start_date and self.end_date:
+            validate_date_range(self.start_date, self.end_date)
+        if all(v is not None for v in [self.lat_min, self.lat_max, self.lon_min, self.lon_max]):
+            validate_lat_lon_bounds(self.lat_min, self.lat_max, self.lon_min, self.lon_max)
+        return self
 
 
 class RegridRequest(BaseModel):
     dataset_id: str
-    target_resolution: float = Field(..., description="Target resolution in degrees")
+    target_resolution: float = Field(..., gt=0, le=10, description="Target resolution in degrees")
     method: str = Field("bilinear", description="Regridding method")
 
 
@@ -146,7 +167,7 @@ class MaskByCountryRequest(BaseModel):
 
 class BatchETCCDIRequest(BaseModel):
     dataset_id: str = Field(..., description="Dataset ID (daily temperature or precipitation)")
-    indices: list[str] = Field(..., description="List of ETCCDI index names (e.g., ['TXx', 'SU'])")
+    indices: list[str] = Field(..., max_length=22, description="List of ETCCDI index names (e.g., ['TXx', 'SU'])")
     freq: str = Field("YS", description="Output frequency: YS (annual), QS-DEC (seasonal), MS (monthly)")
 
 
@@ -438,6 +459,13 @@ async def download_dataset(request: DownloadRequest):
         metadata = session_manager.get_metadata(request.dataset_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+    # Check dataset size before materializing
+    from rcmes_mcp.utils.validation import check_download_size
+    try:
+        check_download_size(ds)
+    except ValueError as e:
+        raise HTTPException(status_code=413, detail=str(e))
 
     # Compute if lazy (dask array)
     if hasattr(ds, 'compute'):
