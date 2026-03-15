@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -52,6 +53,19 @@ app = FastAPI(
 
 # Path to React build (web/dist after npm run build)
 STATIC_DIR = Path(__file__).parent.parent.parent / "web" / "dist"
+
+# Directory for persisted chat images (so they survive localStorage)
+IMAGES_DIR = Path(os.environ.get("RCMES_IMAGES_DIR", Path.home() / ".rcmes" / "images"))
+IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _save_image(image_base64: str) -> str:
+    """Save a base64 image to disk and return the URL path."""
+    image_id = uuid.uuid4().hex[:12]
+    filename = f"{image_id}.png"
+    filepath = IMAGES_DIR / filename
+    filepath.write_bytes(base64.b64decode(image_base64))
+    return f"/api/images/{filename}"
 
 # Enable CORS for React frontend
 app.add_middleware(
@@ -1286,14 +1300,18 @@ async def _stream_chat(messages: list[dict], dataset_id: str | None):
                         else:
                             # Emit image(s) separately if present
                             if tool_result.get("image_base64"):
+                                image_url = _save_image(tool_result["image_base64"])
                                 yield _sse_event("image", {
                                     "tool_call_id": tool_call_id,
                                     "image_base64": tool_result["image_base64"],
+                                    "image_url": image_url,
                                 })
                             for img in tool_result.get("images", []):
+                                image_url = _save_image(img)
                                 yield _sse_event("image", {
                                     "tool_call_id": tool_call_id,
                                     "image_base64": img,
+                                    "image_url": image_url,
                                 })
 
                             output_ids = _extract_dataset_ids_from_result(tool_result)
@@ -1628,6 +1646,19 @@ async def health_check() -> dict[str, Any]:
         "service": "rcmes-api",
         "datasets_loaded": len(datasets),
     }
+
+
+# ============================================================================
+# Persisted Chat Images
+# ============================================================================
+
+@app.get("/api/images/{filename}")
+async def serve_image(filename: str):
+    """Serve a persisted chat image."""
+    filepath = IMAGES_DIR / filename
+    if not filepath.exists() or not filepath.is_file():
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(filepath, media_type="image/png")
 
 
 # ============================================================================

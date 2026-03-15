@@ -41,6 +41,7 @@ export interface ToolProgressEvent {
 export interface ImageEvent {
   tool_call_id: string;
   image_base64: string;
+  image_url?: string;
 }
 
 export interface MessageEndEvent {
@@ -71,6 +72,7 @@ export interface ToolExecution {
   error?: string;
   duration_ms?: number;
   image_base64?: string;
+  image_url?: string;
   progress?: { completed: number; total: number; detail: string };
 }
 

@@ -35,10 +35,12 @@ function persistSessions(sessions: ChatSession[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
 }
 
-function stripImages(messages: ChatMessage[]): ChatMessage[] {
+function stripBase64(messages: ChatMessage[]): ChatMessage[] {
+  // Strip large base64 data from messages but keep lightweight image URLs
   return messages.map(m => ({
     ...m,
-    images: [],
+    // Keep URL-based images, strip inline base64 data URIs
+    images: m.images.filter(img => !img.startsWith('data:')),
     tools: m.tools.map(t => ({ ...t, image_base64: undefined })),
   }));
 }
@@ -62,7 +64,7 @@ export function autoSaveSession(
 
   const now = new Date().toISOString();
   const sessions = loadSessions();
-  const stripped = stripImages(messages);
+  const stripped = stripBase64(messages);
   const title = deriveTitle(messages);
 
   if (sessionId) {

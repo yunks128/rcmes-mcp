@@ -374,15 +374,21 @@ export default function ChatMessage({ message, onImageClick, onOptionSelect, isL
         )}
 
         {/* Inline images */}
-        {images.map((img, i) => (
-          <img
-            key={i}
-            className="chat-msg-image"
-            src={`data:image/png;base64,${img}`}
-            alt="Visualization"
-            onClick={() => onImageClick?.(`data:image/png;base64,${img}`)}
-          />
-        ))}
+        {images.map((img, i) => {
+          // Support both server URLs (/api/images/...) and legacy base64 data URIs
+          const src = img.startsWith('data:') || img.startsWith('/') || img.startsWith('http')
+            ? img
+            : `data:image/png;base64,${img}`;
+          return (
+            <img
+              key={i}
+              className="chat-msg-image"
+              src={src}
+              alt="Visualization"
+              onClick={() => onImageClick?.(src)}
+            />
+          );
+        })}
       </div>
     </div>
   );

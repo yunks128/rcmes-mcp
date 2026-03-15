@@ -247,16 +247,18 @@ export function useChat(options: UseChatOptions = {}) {
 
             case 'image': {
               const evt = data as ImageEvent;
+              // Prefer server URL for persistence; fall back to base64 data URI
+              const imgSrc = evt.image_url || `data:image/png;base64,${evt.image_base64}`;
               updateMessages(prev => {
                 const updated = [...prev];
                 const last = updated[updated.length - 1];
                 if (last?.role === 'assistant') {
                   updated[updated.length - 1] = {
                     ...last,
-                    images: [...last.images, evt.image_base64],
+                    images: [...last.images, imgSrc],
                     tools: last.tools.map(t =>
                       t.tool_call_id === evt.tool_call_id
-                        ? { ...t, image_base64: evt.image_base64 }
+                        ? { ...t, image_url: evt.image_url, image_base64: evt.image_base64 }
                         : t
                     ),
                   };
