@@ -8,12 +8,15 @@ including NEX-GDDP-CMIP6 on AWS S3.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
+import threading
 import time
 from datetime import timedelta
 from pathlib import Path
 
+import numpy as np
 import xarray as xr
 
 logger = logging.getLogger("rcmes.tools.data_access")
@@ -34,10 +37,14 @@ from rcmes_mcp.utils.cloud import (
 from rcmes_mcp.utils.session import session_manager
 from rcmes_mcp.utils.validation import validate_date_range, validate_lat_lon_bounds
 
-import threading
-
 # Thread-local storage for progress callback (avoids polluting MCP tool signatures)
 _thread_local = threading.local()
+
+# Encoding for compressed NetCDF cache files (~60-70% smaller)
+_NC_ENCODING_DEFAULTS = {
+    "zlib": True,
+    "complevel": 4,  # balance between speed and ratio
+}
 
 
 def _get_subset_cache_key(
@@ -63,8 +70,6 @@ def _get_cached_subset(cache_key: str) -> xr.Dataset | None:
 
     if cache_file.exists():
         try:
-            # Check if file is not too old (24h TTL)
-            import time
             file_age = time.time() - cache_file.stat().st_mtime
             if file_age < 24 * 3600:  # 24 hours
                 return xr.open_dataset(cache_file, chunks="auto")
@@ -73,24 +78,67 @@ def _get_cached_subset(cache_key: str) -> xr.Dataset | None:
     return None
 
 
+def _get_cached_stats(cache_key: str) -> dict | None:
+    """Retrieve pre-computed statistics for a cached subset."""
+    stats_file = result_cache.cache_dir / "subsets" / f"{cache_key}_stats.json"
+    if stats_file.exists():
+        try:
+            file_age = time.time() - stats_file.stat().st_mtime
+            if file_age < 24 * 3600:
+                with open(stats_file) as f:
+                    return json.load(f)
+        except Exception:
+            pass
+    return None
+
+
 def _cache_subset(cache_key: str, ds: xr.Dataset) -> None:
-    """Cache a subset to disk for future use."""
+    """Cache a subset to disk with compression, and pre-compute basic statistics."""
     try:
         cache_dir = result_cache.cache_dir / "subsets"
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_file = cache_dir / f"{cache_key}.nc"
 
-        # Only cache small-to-medium subsets (< 100MB estimated)
-        # Estimate size: time * lat * lon * 4 bytes * 1.5 overhead
+        # Only cache small-to-medium subsets (< 100MB estimated uncompressed)
         estimated_size = 1
         for dim_size in ds.dims.values():
             estimated_size *= dim_size
         estimated_size *= 6  # 4 bytes per float32 + overhead
 
         if estimated_size < 100 * 1024 * 1024:  # 100MB limit
-            ds.to_netcdf(cache_file)
+            # Build per-variable encoding with zlib compression
+            encoding = {}
+            for var in ds.data_vars:
+                encoding[var] = _NC_ENCODING_DEFAULTS.copy()
+            ds.to_netcdf(cache_file, encoding=encoding)
+
+            # Pre-compute and cache basic statistics alongside the data
+            _precompute_stats(cache_key, ds)
     except Exception:
         pass  # Caching failures shouldn't break the main flow
+
+
+def _precompute_stats(cache_key: str, ds: xr.Dataset) -> None:
+    """Pre-compute basic statistics and save as JSON next to the cached subset."""
+    try:
+        stats_file = result_cache.cache_dir / "subsets" / f"{cache_key}_stats.json"
+        import dask
+        for var_name in ds.data_vars:
+            data = ds[var_name]
+            mean_val, std_val, min_val, max_val = dask.compute(
+                data.mean(), data.std(), data.min(), data.max()
+            )
+            stats = {
+                "variable": var_name,
+                "mean": float(mean_val),
+                "std": float(std_val),
+                "min": float(min_val),
+                "max": float(max_val),
+            }
+            with open(stats_file, "w") as f:
+                json.dump(stats, f)
+    except Exception:
+        pass  # Pre-computation is best-effort
 
 
 @mcp.tool()
@@ -412,7 +460,7 @@ def load_climate_data(
                    "duration_ms": duration_ms},
         )
 
-        return {
+        result = {
             "success": True,
             "dataset_id": dataset_id,
             "variable": variable,
@@ -432,6 +480,13 @@ def load_climate_data(
             },
             "note": f"Use dataset_id '{dataset_id}' in subsequent operations.",
         }
+
+        # Attach pre-computed statistics if available (instant, no compute)
+        cached_stats = _get_cached_stats(cache_key)
+        if cached_stats:
+            result["precomputed_statistics"] = cached_stats
+
+        return result
 
     except FileNotFoundError as e:
         logger.error(f"Data not found: {e}", extra={"tool": "load_climate_data", "error": str(e)})

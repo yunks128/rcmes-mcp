@@ -7,22 +7,41 @@ and remote services (OPeNDAP, THREDDS).
 
 from __future__ import annotations
 
+import logging
 import os
-from functools import lru_cache
-from typing import Any
-
+import shutil
 import tempfile
+from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import fsspec
 import s3fs
 import xarray as xr
 
+logger = logging.getLogger("rcmes.cloud")
+
 # Local file cache directory for downloaded S3 files
-_FILE_CACHE_DIR = Path(os.environ.get(
+_CACHE_ROOT = Path(os.environ.get(
     "RCMES_CACHE_DIR",
     os.path.join(tempfile.gettempdir(), "rcmes_mcp_cache"),
-)) / "s3_files"
+))
+_FILE_CACHE_DIR = _CACHE_ROOT / "s3_files"
+
+# Directory for locally cached Kerchunk reference Parquet files
+_KERCHUNK_CACHE_DIR = _CACHE_ROOT / "kerchunk_refs"
+
+# Optional local data directory — when set, data is served from local Zarr/NetCDF
+# files instead of S3. Set via RCMES_LOCAL_DATA_DIR env var.
+LOCAL_DATA_DIR: Path | None = (
+    Path(os.environ["RCMES_LOCAL_DATA_DIR"])
+    if os.environ.get("RCMES_LOCAL_DATA_DIR")
+    else None
+)
+
+# Default Dask chunk sizes optimised for typical regional queries
+# time=365 (1 year of daily data), lat/lon=100 (~25° at 0.25° resolution)
+DEFAULT_CHUNKS: dict[str, int] = {"time": 365, "lat": 100, "lon": 100}
 
 # NEX-GDDP-CMIP6 dataset configuration
 NEX_GDDP_CMIP6_BUCKET = "nex-gddp-cmip6"
@@ -101,7 +120,7 @@ def get_s3_filesystem() -> s3fs.S3FileSystem:
 
     Configured with optimized settings for climate data access:
     - 8MB default block size for efficient large reads
-    - Connection pooling for reduced latency
+    - 50-connection pool for high concurrency
     - Read-ahead caching for sequential access
     """
     return s3fs.S3FileSystem(
@@ -109,9 +128,9 @@ def get_s3_filesystem() -> s3fs.S3FileSystem:
         default_block_size=8 * 1024 * 1024,  # 8MB blocks for better throughput
         default_cache_type="readahead",  # Pre-fetch data for sequential reads
         config_kwargs={
-            "max_pool_connections": 25,  # Increase connection pool
+            "max_pool_connections": 50,  # Large pool for concurrent requests
             "connect_timeout": 30,
-            "read_timeout": 60,
+            "read_timeout": 120,  # Generous timeout for large spatial extents
         },
     )
 
@@ -160,19 +179,69 @@ def list_available_files(
         return []
 
 
+def _get_local_dataset_path(model: str, scenario: str) -> Path | None:
+    """Return path to a local Zarr/NetCDF store for a model/scenario, or None."""
+    if LOCAL_DATA_DIR is None:
+        return None
+    # Check for Zarr store first (faster), then NetCDF
+    zarr_path = LOCAL_DATA_DIR / f"{model}_{scenario}.zarr"
+    if zarr_path.exists():
+        return zarr_path
+    nc_path = LOCAL_DATA_DIR / f"{model}_{scenario}.nc"
+    if nc_path.exists():
+        return nc_path
+    return None
+
+
+def _get_cached_kerchunk_ref(model: str, scenario: str) -> str:
+    """Return a local path to cached Kerchunk reference Parquet, downloading if needed.
+
+    Kerchunk reference Parquet files are static metadata (~1-10 MB) that map
+    virtual Zarr chunks to byte ranges in the original S3 NetCDF files.
+    Caching them locally eliminates a 1-5s S3 round-trip on every dataset open.
+    """
+    _KERCHUNK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    local_dir = _KERCHUNK_CACHE_DIR / f"{model}_{scenario}"
+
+    # If we already have a local copy, use it
+    if local_dir.exists() and any(local_dir.iterdir()):
+        return str(local_dir)
+
+    # Download from S3 to local cache
+    s3_ref = f"carbonplan-share/nasa-nex-reference/references_prod/{model}_{scenario}/reference.parquet"
+    try:
+        fs = get_s3_filesystem()
+        # reference.parquet can be a single file or a directory (partitioned)
+        if fs.isdir(s3_ref):
+            local_dir.mkdir(parents=True, exist_ok=True)
+            fs.get(s3_ref, str(local_dir), recursive=True)
+        else:
+            local_dir.mkdir(parents=True, exist_ok=True)
+            fs.get(s3_ref, str(local_dir / "reference.parquet"))
+        logger.info(f"Cached Kerchunk references for {model}_{scenario}")
+        return str(local_dir)
+    except Exception:
+        # Fall back to remote S3 URL if local caching fails
+        logger.warning(f"Failed to cache Kerchunk refs for {model}_{scenario}, using S3 directly")
+        # Clean up partial download
+        if local_dir.exists():
+            shutil.rmtree(local_dir, ignore_errors=True)
+        return f"s3://carbonplan-share/nasa-nex-reference/references_prod/{model}_{scenario}/reference.parquet"
+
+
 def open_nex_gddp_dataset(
     variable: str,
     model: str,
     scenario: str,
     start_year: int | None = None,
     end_year: int | None = None,
-    chunks: dict[str, int] | None = {},
+    chunks: dict[str, int] | None = None,
     lat_bounds: tuple[float, float] | None = None,
     lon_bounds: tuple[float, float] | None = None,
     progress_callback: Any | None = None,
 ) -> xr.Dataset:
     """
-    Open NEX-GDDP-CMIP6 dataset from S3.
+    Open NEX-GDDP-CMIP6 dataset, preferring local data, then cached refs, then S3.
 
     Uses xarray with Dask for lazy loading - data is only read when needed.
     Optimized for fast access with early spatial subsetting.
@@ -183,29 +252,60 @@ def open_nex_gddp_dataset(
         scenario: Emissions scenario
         start_year: Optional start year filter
         end_year: Optional end year filter
-        chunks: Dask chunk sizes (default: optimized for typical regional queries)
+        chunks: Dask chunk sizes (default: DEFAULT_CHUNKS optimised for regional queries)
         lat_bounds: Optional (min, max) latitude bounds for early subsetting
         lon_bounds: Optional (min, max) longitude bounds for early subsetting
 
     Returns:
         xarray Dataset with lazy-loaded data
     """
-    ref_url = f"s3://carbonplan-share/nasa-nex-reference/references_prod/{model}_{scenario}/reference.parquet"
+    if chunks is None:
+        chunks = DEFAULT_CHUNKS
 
-    storage_options = {
-        'anon': True,
-        'remote_protocol': 's3',
-        'remote_options': {'anon': True, 'asynchronous': True},
-        'target_protocol': 's3',
-        'target_options': {'anon': True}
-    }
+    # --- Priority 1: Local Zarr/NetCDF store ---
+    local_path = _get_local_dataset_path(model, scenario)
+    if local_path is not None:
+        logger.info(f"Opening local dataset: {local_path}")
+        if local_path.suffix == ".zarr" or local_path.is_dir():
+            ds = xr.open_zarr(local_path, chunks=chunks)
+        else:
+            ds = xr.open_dataset(local_path, chunks=chunks)
+    else:
+        # --- Priority 2: Kerchunk references (cached locally when possible) ---
+        ref_path = _get_cached_kerchunk_ref(model, scenario)
 
-    ds = xr.open_dataset(
-        ref_url,
-        engine="kerchunk",
-        storage_options=storage_options,
-        chunks=chunks  
-    )
+        if ref_path.startswith("s3://"):
+            # Remote reference — use S3 storage options
+            storage_options = {
+                'anon': True,
+                'remote_protocol': 's3',
+                'remote_options': {'anon': True, 'asynchronous': True},
+                'target_protocol': 's3',
+                'target_options': {'anon': True},
+            }
+            ds = xr.open_dataset(
+                ref_path,
+                engine="kerchunk",
+                storage_options=storage_options,
+                chunks=chunks,
+            )
+        else:
+            # Local cached reference — find the parquet file/dir
+            local_ref = Path(ref_path)
+            parquet_file = local_ref / "reference.parquet"
+            ref_to_open = str(parquet_file) if parquet_file.exists() else ref_path
+            storage_options = {
+                'remote_protocol': 's3',
+                'remote_options': {'anon': True, 'asynchronous': True},
+                'target_protocol': 's3',
+                'target_options': {'anon': True},
+            }
+            ds = xr.open_dataset(
+                ref_to_open,
+                engine="kerchunk",
+                storage_options=storage_options,
+                chunks=chunks,
+            )
 
     # 1. Variable selection (Lazy)
     if variable in ds.data_vars:
@@ -220,7 +320,7 @@ def open_nex_gddp_dataset(
         ds = ds.sel(time=time_slice)
 
     # 3. Spatial subset (Lazy)
-    # This is critical when chunks=None. It ensures that when you 
+    # This is critical when chunks=None. It ensures that when you
     # eventually do call .load(), you only pull the regional bytes.
     ds = _apply_spatial_subset(ds, lat_bounds, lon_bounds)
 

@@ -62,6 +62,7 @@ dev = [
 rcmes-mcp = "rcmes_mcp.server:main"
 rcmes-chat = "rcmes_mcp.azure_client:main"
 rcmes-api = "rcmes_mcp.api:main"
+rcmes-warmup = "rcmes_mcp.warmup:main"
 
 [project.urls]
 Homepage = "https://rcmes.jpl.nasa.gov/"
