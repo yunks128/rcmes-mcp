@@ -405,7 +405,16 @@ def load_climate_data(
     else:
         lon_bounds_arg = (lon_min_360, lon_max_360)
 
-    # Check cache first
+    # Progress callback helper
+    progress_cb = getattr(_thread_local, 'progress_callback', None)
+    def _progress(step: int, total: int, detail: str):
+        if progress_cb:
+            progress_cb(step, total, detail)
+
+    TOTAL_STEPS = 5
+
+    # Step 1: Check cache
+    _progress(1, TOTAL_STEPS, "Checking local cache...")
     cache_key = _get_subset_cache_key(
         variable, model, scenario, start_date, end_date,
         lat_min, lat_max, lon_min_360, lon_max_360
@@ -414,11 +423,11 @@ def load_climate_data(
 
     try:
         if cached_ds is not None:
-            # Use cached data
+            _progress(2, TOTAL_STEPS, "Cache hit — loading from disk")
             ds = cached_ds
         else:
-            # Open dataset from S3 with early spatial subsetting
-            progress_cb = getattr(_thread_local, 'progress_callback', None)
+            # Step 2: Open dataset
+            _progress(2, TOTAL_STEPS, f"Opening {model}/{scenario} from S3...")
             ds = open_nex_gddp_dataset(
                 variable=variable,
                 model=model,
@@ -430,13 +439,16 @@ def load_climate_data(
                 progress_callback=progress_cb,
             )
 
-            # Subset by time
+            # Step 3: Subset by time
+            _progress(3, TOTAL_STEPS, f"Subsetting {start_date} to {end_date}...")
             ds = ds.sel(time=slice(start_date, end_date))
 
-            # Cache the subset for future use (async-safe, non-blocking)
+            # Step 4: Cache the subset
+            _progress(4, TOTAL_STEPS, "Caching result to disk (compressed)...")
             _cache_subset(cache_key, ds)
 
-        # Store in session
+        # Step 5: Store in session
+        _progress(5, TOTAL_STEPS, "Storing in session...")
         dataset_id = session_manager.store(
             data=ds,
             source=dataset,

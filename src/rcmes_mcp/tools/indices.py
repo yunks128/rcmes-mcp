@@ -18,6 +18,16 @@ from rcmes_mcp.utils.validation import validate_date_range
 
 logger = logging.getLogger("rcmes.tools.indices")
 
+# Re-use thread-local for progress callbacks
+from rcmes_mcp.tools.data_access import _thread_local
+
+
+def _progress(step: int, total: int, detail: str):
+    """Emit a progress event if a callback is registered."""
+    cb = getattr(_thread_local, 'progress_callback', None)
+    if cb:
+        cb(step, total, detail)
+
 # ETCCDI indices documentation
 TEMPERATURE_INDICES = {
     "TXx": "Maximum of daily maximum temperature",
@@ -182,6 +192,7 @@ def calculate_etccdi_index(
     index_upper = index.upper()
 
     try:
+        _progress(1, 3, f"Computing {index_upper} index...")
         # Temperature extreme indices
         if index_upper == "TXX":
             result = indices.tx_max(data, freq=freq)
@@ -277,6 +288,7 @@ def calculate_etccdi_index(
         logger.exception(f"calculate_etccdi_index {index} failed for {dataset_id}", extra={"tool": "calculate_etccdi_index", "error": str(e)})
         return {"error": f"Failed to calculate {index}: {str(e)}"}
 
+    _progress(2, 3, "Storing result...")
     new_id = session_manager.store(
         data=result,
         source=metadata.source,
@@ -285,6 +297,7 @@ def calculate_etccdi_index(
         scenario=metadata.scenario,
         description=f"{index_upper} index calculated from {dataset_id}",
     )
+    _progress(3, 3, f"{index_upper} index complete")
 
     logger.info(f"calculate_etccdi_index {index_upper} from {dataset_id} → {new_id}", extra={"tool": "calculate_etccdi_index", "dataset_id": new_id})
 
@@ -343,6 +356,7 @@ def analyze_heatwaves(
 
     try:
         # Calculate threshold
+        _progress(1, 4, f"Computing {threshold_percentile}th percentile threshold...")
         if baseline_start and baseline_end:
             baseline = tasmax.sel(time=slice(baseline_start, baseline_end))
         else:
@@ -354,7 +368,7 @@ def analyze_heatwaves(
         hot_days = tasmax > threshold
 
         # Find heatwave events (consecutive hot days >= min_duration)
-        # This is a simplified approach - for production, use xclim's heat_wave_index
+        _progress(2, 4, "Detecting heatwave events...")
         try:
             from xclim import indices
             hw_freq = indices.heat_wave_frequency(
@@ -392,6 +406,7 @@ def analyze_heatwaves(
             })
 
         # Calculate overall statistics
+        _progress(3, 4, "Computing heatwave statistics...")
         if "heatwave_frequency" in hw_stats:
             mean_freq = float(hw_stats["heatwave_frequency"].mean().compute())
             mean_duration = float(hw_stats["heatwave_max_duration"].mean().compute())
@@ -405,6 +420,7 @@ def analyze_heatwaves(
         logger.exception(f"analyze_heatwaves failed for {dataset_id}", extra={"tool": "analyze_heatwaves", "error": str(e)})
         return {"error": f"Failed to analyze heatwaves: {str(e)}"}
 
+    _progress(4, 4, "Heatwave analysis complete")
     new_id = session_manager.store(
         data=hw_stats,
         source=metadata.source,

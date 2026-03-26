@@ -1244,49 +1244,47 @@ async def _stream_chat(messages: list[dict], dataset_id: str | None):
                     })
                 else:
                     try:
-                        # For long-running tools, stream progress events
-                        if tool_name == "load_climate_data":
-                            from rcmes_mcp.tools.data_access import _thread_local as _da_tl
-                            loop = asyncio.get_running_loop()
-                            progress_queue: asyncio.Queue = asyncio.Queue()
+                        # Run ALL tools with progress streaming support.
+                        # Tools that call the thread-local progress_callback
+                        # will have their updates streamed to the UI in real time.
+                        from rcmes_mcp.tools.data_access import _thread_local as _da_tl
+                        loop = asyncio.get_running_loop()
+                        progress_queue: asyncio.Queue = asyncio.Queue()
 
-                            def _progress_cb(completed: int, total: int, detail: str):
-                                loop.call_soon_threadsafe(
-                                    progress_queue.put_nowait,
-                                    {"completed": completed, "total": total, "detail": detail},
-                                )
+                        def _progress_cb(completed: int, total: int, detail: str):
+                            loop.call_soon_threadsafe(
+                                progress_queue.put_nowait,
+                                {"completed": completed, "total": total, "detail": detail},
+                            )
 
-                            def _run_with_progress():
-                                _da_tl.progress_callback = _progress_cb
-                                try:
-                                    return impl(**args)
-                                finally:
-                                    _da_tl.progress_callback = None
+                        def _run_with_progress():
+                            _da_tl.progress_callback = _progress_cb
+                            try:
+                                return impl(**args)
+                            finally:
+                                _da_tl.progress_callback = None
 
-                            task = asyncio.ensure_future(asyncio.to_thread(_run_with_progress))
+                        task = asyncio.ensure_future(asyncio.to_thread(_run_with_progress))
 
-                            while not task.done():
-                                try:
-                                    item = await asyncio.wait_for(progress_queue.get(), timeout=0.3)
-                                    yield _sse_event("tool_progress", {
-                                        "tool_call_id": tool_call_id,
-                                        "progress": item,
-                                    })
-                                except asyncio.TimeoutError:
-                                    continue
-
-                            tool_result = task.result()
-
-                            # Drain remaining progress events
-                            while not progress_queue.empty():
-                                item = progress_queue.get_nowait()
+                        while not task.done():
+                            try:
+                                item = await asyncio.wait_for(progress_queue.get(), timeout=0.3)
                                 yield _sse_event("tool_progress", {
                                     "tool_call_id": tool_call_id,
                                     "progress": item,
                                 })
-                        else:
-                            # Run tool in thread pool
-                            tool_result = await asyncio.to_thread(impl, **args)
+                            except asyncio.TimeoutError:
+                                continue
+
+                        tool_result = task.result()
+
+                        # Drain remaining progress events
+                        while not progress_queue.empty():
+                            item = progress_queue.get_nowait()
+                            yield _sse_event("tool_progress", {
+                                "tool_call_id": tool_call_id,
+                                "progress": item,
+                            })
 
                         duration_ms = int((time.time() - start_time) * 1000)
 

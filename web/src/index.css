@@ -561,6 +561,60 @@ body {
   margin-top: 4px;
 }
 
+/* Progress bar for tool execution */
+.tool-badge-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.tool-badge-progress-detail {
+  flex-shrink: 0;
+  max-width: 200px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-badge-progress-bar-track {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-tertiary, #e0e0e0);
+  overflow: hidden;
+  min-width: 60px;
+}
+
+.tool-badge-progress-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.tool-badge-progress-bar-indeterminate {
+  height: 100%;
+  width: 40%;
+  border-radius: 2px;
+  background: #1976d2;
+  animation: progress-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes progress-indeterminate {
+  0% { transform: translateX(-100%); }
+  50% { transform: translateX(150%); }
+  100% { transform: translateX(-100%); }
+}
+
+.tool-badge-progress-step {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
 .tool-badge-error {
   font-size: 0.75rem;
   color: var(--error);

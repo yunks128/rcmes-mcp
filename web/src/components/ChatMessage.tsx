@@ -311,17 +311,28 @@ export default function ChatMessage({ message, onImageClick, onOptionSelect, isL
                     <div className="tool-badge-summary" dangerouslySetInnerHTML={{ __html: formatMarkdown(tool.result_summary) }} />
                   )}
                   {tool.progress && tool.status === 'running' && (
-                    <div className="tool-badge-summary" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <span>Downloading {tool.progress.completed}/{tool.progress.total}</span>
-                      <div style={{ flex: 1, height: 4, borderRadius: 2, background: '#e0e0e0', overflow: 'hidden' }}>
-                        <div style={{
-                          height: '100%',
-                          width: `${(tool.progress.completed / tool.progress.total) * 100}%`,
-                          background: STATUS_COLORS[tool.status],
-                          borderRadius: 2,
-                          transition: 'width 0.3s ease',
-                        }} />
+                    <div className="tool-badge-progress">
+                      <div className="tool-badge-progress-detail">
+                        {tool.progress.detail || `Step ${tool.progress.completed}/${tool.progress.total}`}
                       </div>
+                      <div className="tool-badge-progress-bar-track">
+                        {tool.progress.total > 0 ? (
+                          <div
+                            className="tool-badge-progress-bar-fill"
+                            style={{
+                              width: `${(tool.progress.completed / tool.progress.total) * 100}%`,
+                              background: STATUS_COLORS[tool.status],
+                            }}
+                          />
+                        ) : (
+                          <div className="tool-badge-progress-bar-indeterminate" />
+                        )}
+                      </div>
+                      {tool.progress.total > 0 && (
+                        <div className="tool-badge-progress-step">
+                          {tool.progress.completed}/{tool.progress.total}
+                        </div>
+                      )}
                     </div>
                   )}
                   {tool.error && (

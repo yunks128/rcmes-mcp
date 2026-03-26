@@ -24,6 +24,16 @@ logger = logging.getLogger("rcmes.tools.visualization")
 from rcmes_mcp.server import mcp
 from rcmes_mcp.utils.session import session_manager
 
+# Re-use thread-local for progress callbacks
+from rcmes_mcp.tools.data_access import _thread_local
+
+
+def _progress(step: int, total: int, detail: str):
+    """Emit a progress event if a callback is registered."""
+    cb = getattr(_thread_local, 'progress_callback', None)
+    if cb:
+        cb(step, total, detail)
+
 # Simple PNG cache directory
 _PLOT_CACHE_DIR = Path(tempfile.gettempdir()) / "rcmes_mcp_plot_cache"
 _PLOT_CACHE_DIR.mkdir(exist_ok=True)
@@ -112,6 +122,7 @@ def generate_map(
     """
     t0 = time.perf_counter()
 
+    _progress(1, 4, "Checking plot cache...")
     # Check plot cache
     cache_key = _plot_cache_key(
         func="map", dataset_id=dataset_id, time_index=time_index,
@@ -129,6 +140,7 @@ def generate_map(
         return {"error": str(e)}
 
     try:
+        _progress(2, 4, "Computing spatial data...")
         import matplotlib.pyplot as plt
 
         # Try to import cartopy for better maps
@@ -170,6 +182,7 @@ def generate_map(
         is_global = lon_range > 300
 
         # Create figure
+        _progress(3, 4, "Rendering map...")
         if has_cartopy:
             fig, ax = plt.subplots(
                 figsize=(14, 7) if is_global else (12, 8),
@@ -223,6 +236,7 @@ def generate_map(
             ax.set_title(f"{metadata.variable}{model_str}\n{time_label}")
 
         # Save, encode, and cache
+        _progress(4, 4, "Encoding image...")
         filename = f"map_{dataset_id}.png"
         filepath = _save_fig(fig, filename)
         img_base64 = _fig_to_base64(fig)
@@ -272,7 +286,9 @@ def generate_timeseries_plot(
         return {"error": "No dataset IDs provided"}
 
     t0 = time.perf_counter()
+    total_steps = len(dataset_ids) + 2  # data steps + render + encode
 
+    _progress(1, total_steps, "Checking plot cache...")
     # Check plot cache
     cache_key = _plot_cache_key(
         func="timeseries", dataset_ids=dataset_ids, labels=labels,
@@ -289,6 +305,7 @@ def generate_timeseries_plot(
         fig, ax = plt.subplots(figsize=(12, 6))
 
         for i, dataset_id in enumerate(dataset_ids):
+            _progress(i + 2, total_steps, f"Processing dataset {i+1}/{len(dataset_ids)}...")
             try:
                 ds = session_manager.get(dataset_id)
                 metadata = session_manager.get_metadata(dataset_id)
@@ -363,6 +380,7 @@ def generate_timeseries_plot(
             ax.set_title(title)
 
         # Save, encode, and cache
+        _progress(total_steps, total_steps, "Encoding image...")
         filename = f"timeseries_{dataset_ids[0]}.png"
         filepath = _save_fig(fig, filename)
         img_base64 = _fig_to_base64(fig)

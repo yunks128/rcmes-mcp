@@ -8,6 +8,7 @@ and model evaluation metrics.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 import numpy as np
@@ -18,6 +19,16 @@ from rcmes_mcp.server import mcp
 from rcmes_mcp.utils.session import session_manager
 
 logger = logging.getLogger("rcmes.tools.analysis")
+
+# Re-use the same thread-local as data_access for progress callbacks
+from rcmes_mcp.tools.data_access import _thread_local
+
+
+def _progress(step: int, total: int, detail: str):
+    """Emit a progress event if a callback is registered."""
+    cb = getattr(_thread_local, 'progress_callback', None)
+    if cb:
+        cb(step, total, detail)
 
 
 @mcp.tool()
@@ -57,6 +68,7 @@ def calculate_statistics(
     try:
         if statistic == "all":
             # Single compute pass for all basic stats
+            _progress(1, 3, "Computing mean, std, min, max...")
             import dask
             mean_val, std_val, min_val, max_val = dask.compute(
                 data.mean(), data.std(), data.min(), data.max()
@@ -67,6 +79,7 @@ def calculate_statistics(
             results["max"] = float(max_val)
 
             # Compute percentiles (subsample for large datasets)
+            _progress(2, 3, "Computing percentiles...")
             sample = data.values.flatten()
             if len(sample) > 1000000:
                 sample = np.random.choice(sample[~np.isnan(sample)], 1000000)
@@ -77,6 +90,7 @@ def calculate_statistics(
                 "p75": float(np.nanpercentile(sample, 75)),
                 "p95": float(np.nanpercentile(sample, 95)),
             }
+            _progress(3, 3, "Statistics complete")
         else:
             if statistic == "mean":
                 results["mean"] = float(data.mean().compute())
@@ -128,6 +142,7 @@ def calculate_climatology(
         return {"error": str(e)}
 
     try:
+        _progress(1, 2, f"Computing {period} climatology...")
         if period == "daily":
             climatology = ds.groupby("time.dayofyear").mean()
         elif period == "monthly":
@@ -136,6 +151,7 @@ def calculate_climatology(
             climatology = ds.groupby("time.season").mean()
         else:
             return {"error": f"Invalid period '{period}'. Use: daily, monthly, seasonal"}
+        _progress(2, 2, "Climatology complete")
 
     except Exception as e:
         return {"error": f"Failed to calculate climatology: {str(e)}"}
@@ -186,6 +202,7 @@ def calculate_trend(
         data = ds[var_name]
 
     try:
+        _progress(1, 3, "Computing area-weighted spatial mean...")
         # Calculate area-weighted spatial mean time series
         weights = np.cos(np.deg2rad(data.lat))
         weights = weights / weights.sum()
@@ -196,6 +213,7 @@ def calculate_trend(
             time_series = data.mean(dim=[d for d in data.dims if d != "time"])
 
         # Convert to numpy
+        _progress(2, 3, "Running linear regression...")
         y = time_series.values
         x = np.arange(len(y))
 
@@ -238,6 +256,7 @@ def calculate_trend(
 
         # Confidence interval (95%)
         ci_95 = 1.96 * std_err * steps_per_decade
+        _progress(3, 3, "Trend analysis complete")
 
     except Exception as e:
         logger.exception(f"calculate_trend failed for {dataset_id}", extra={"tool": "calculate_trend", "error": str(e)})
@@ -299,6 +318,7 @@ def calculate_regional_mean(
         data = ds[var_name]
 
     try:
+        _progress(1, 2, "Computing area-weighted regional mean...")
         if area_weighted and "lat" in data.dims:
             # Calculate weights based on latitude
             weights = np.cos(np.deg2rad(data.lat))
@@ -307,10 +327,9 @@ def calculate_regional_mean(
             regional_mean = data.mean(dim=["lat", "lon"])
 
         # Eagerly compute the regional mean (1D time series) so downstream
-        # tools don't need to re-pull from S3. This is the key optimization:
-        # computing a ~30KB 1D result once instead of re-materializing the
-        # full multi-GB Dask graph on every subsequent operation.
+        # tools don't need to re-pull from S3.
         regional_mean = regional_mean.compute()
+        _progress(2, 2, "Regional mean complete")
 
     except Exception as e:
         return {"error": f"Failed to calculate regional mean: {str(e)}"}
