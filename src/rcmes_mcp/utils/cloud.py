@@ -294,11 +294,12 @@ def open_nex_gddp_dataset(
             local_ref = Path(ref_path)
             parquet_file = local_ref / "reference.parquet"
             ref_to_open = str(parquet_file) if parquet_file.exists() else ref_path
+            # For local references, only set remote_options (for S3 data access).
+            # Do NOT set target_protocol/target_options — they conflict with local
+            # reference file resolution and cause Access Denied errors.
             storage_options = {
                 'remote_protocol': 's3',
-                'remote_options': {'anon': True, 'asynchronous': True},
-                'target_protocol': 's3',
-                'target_options': {'anon': True},
+                'remote_options': {'anon': True, 'default_block_size': 8 * 1024 * 1024},
             }
             ds = xr.open_dataset(
                 ref_to_open,

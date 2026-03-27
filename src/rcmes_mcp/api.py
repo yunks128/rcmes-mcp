@@ -58,6 +58,38 @@ STATIC_DIR = Path(__file__).parent.parent.parent / "web" / "dist"
 IMAGES_DIR = Path(os.environ.get("RCMES_IMAGES_DIR", Path.home() / ".rcmes" / "images"))
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
+# Directory for temporary download files (auto-cleaned after TTL)
+DOWNLOADS_DIR = Path(os.environ.get("RCMES_DOWNLOADS_DIR", Path.home() / ".rcmes" / "downloads"))
+DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+_DOWNLOAD_TTL_HOURS = 4  # Files auto-expire after 4 hours
+# Registry of active download tokens: token -> {filepath, filename, created_at, media_type}
+_download_registry: dict[str, dict] = {}
+
+
+def _create_download_link(filepath: Path, filename: str, media_type: str = "application/octet-stream") -> str:
+    """Register a file for temporary download and return the URL."""
+    token = uuid.uuid4().hex[:16]
+    _download_registry[token] = {
+        "filepath": str(filepath),
+        "filename": filename,
+        "created_at": time.time(),
+        "media_type": media_type,
+    }
+    return f"/api/downloads/{token}/{filename}"
+
+
+def _cleanup_expired_downloads():
+    """Remove expired download tokens and their files."""
+    now = time.time()
+    expired = [t for t, info in _download_registry.items()
+               if now - info["created_at"] > _DOWNLOAD_TTL_HOURS * 3600]
+    for token in expired:
+        info = _download_registry.pop(token)
+        try:
+            Path(info["filepath"]).unlink(missing_ok=True)
+        except Exception:
+            pass
+
 
 def _save_image(image_base64: str) -> str:
     """Save a base64 image to disk and return the URL path."""
@@ -897,8 +929,9 @@ def _get_chat_tools() -> list[dict]:
                     "Has access to: xarray (xr), numpy (np), pandas (pd), matplotlib.pyplot (plt), scipy. "
                     "Use get_dataset(dataset_id) to access loaded datasets. "
                     "Use store_dataset(data, description) to save results for later use. "
-                    "Use save_to_netcdf(data, path) or save_to_csv(data, path) to save files "
-                    "(NEVER use data.to_netcdf() directly). "
+                    "For downloads: url = save_to_csv(data) or url = save_to_netcdf(data) — "
+                    "these return a download URL. Print it as a markdown link: print(f'[Download]({url})'). "
+                    "NEVER use data.to_netcdf() or data.to_csv() directly. "
                     "Use print() to show output to the user."
                 ),
                 "parameters": {
@@ -913,10 +946,43 @@ def _get_chat_tools() -> list[dict]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "prepare_download",
+                "description": (
+                    "Prepare a dataset for download and return a temporary download link. "
+                    "Use this when the user asks to download or export data."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string", "description": "Dataset ID to download"},
+                        "format": {
+                            "type": "string",
+                            "enum": ["csv", "netcdf"],
+                            "description": "File format (default: csv)",
+                        },
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
     ]
 
 
 # Map tool names to their implementations for the chat endpoint
+def _normalize_tool_args(tool_name: str, args: dict) -> dict:
+    """Fix common LLM argument naming mistakes before tool dispatch."""
+    # "dataset" → "dataset_id" (very common LLM hallucination)
+    if "dataset" in args and "dataset_id" not in args:
+        args["dataset_id"] = args.pop("dataset")
+    # "datasets" → "dataset_ids" for multi-dataset tools
+    if "datasets" in args and "dataset_ids" not in args:
+        args["dataset_ids"] = args.pop("datasets")
+    return args
+
+
 _CHAT_TOOL_IMPLS: dict[str, Any] = {
     "load_climate_data": data_access.load_climate_data,
     "spatial_subset": processing.spatial_subset,
@@ -938,7 +1004,65 @@ _CHAT_TOOL_IMPLS: dict[str, Any] = {
     "generate_country_map": visualization.generate_country_map,
     "calculate_correlation": analysis.calculate_correlation,
     "execute_python_code": code_execution.execute_python_code,
+    "prepare_download": None,  # Handled inline below
 }
+
+
+def _prepare_download(dataset_id: str, format: str = "csv") -> dict:
+    """Prepare a dataset for download and return a temp link."""
+    from rcmes_mcp.tools.data_access import _thread_local
+    _prog = getattr(_thread_local, 'progress_callback', None)
+
+    def _step(n, total, msg):
+        if _prog:
+            _prog(n, total, msg)
+
+    try:
+        ds = session_manager.get(dataset_id)
+        metadata = session_manager.get_metadata(dataset_id)
+    except KeyError as e:
+        return {"error": str(e)}
+
+    _step(1, 3, "Materializing dataset...")
+    if hasattr(ds, 'compute'):
+        ds = ds.compute()
+
+    var_name = metadata.variable or "data"
+    model_name = metadata.model or "model"
+
+    try:
+        _step(2, 3, f"Writing {format.upper()} file...")
+        if format == "netcdf":
+            filename = f"{var_name}_{model_name}_{dataset_id}.nc"
+            filepath = DOWNLOADS_DIR / filename
+            if isinstance(ds, xr.DataArray):
+                ds = ds.to_dataset(name=var_name)
+            ds.to_netcdf(filepath, engine='scipy')
+            media_type = "application/x-netcdf"
+        else:
+            filename = f"{var_name}_{model_name}_{dataset_id}.csv"
+            filepath = DOWNLOADS_DIR / filename
+            if isinstance(ds, xr.DataArray):
+                df = ds.to_dataframe().reset_index()
+            else:
+                df = ds.to_dataframe().reset_index()
+            df.to_csv(filepath, index=False)
+            media_type = "text/csv"
+
+        _step(3, 3, "Download ready")
+        url = _create_download_link(filepath, filename, media_type)
+        return {
+            "success": True,
+            "download_url": url,
+            "filename": filename,
+            "format": format,
+            "instructions": f"IMPORTANT: Show the user this exact clickable markdown link: [{filename}]({url})",
+        }
+    except Exception as e:
+        return {"error": f"Failed to prepare download: {str(e)}"}
+
+
+_CHAT_TOOL_IMPLS["prepare_download"] = _prepare_download
 
 def _build_system_prompt() -> str:
     """Build the system prompt with actual available models, variables, scenarios."""
@@ -1040,9 +1164,10 @@ def _build_system_prompt() -> str:
         "- Multi-dataset computations or custom comparisons\n"
         "- Custom visualizations beyond the standard plot types\n"
         "- Any analysis requiring custom logic\n\n"
-        "Use `get_dataset('dataset_id')` to access loaded data, `store_dataset(data, 'desc')` to save results. "
-        "Use `save_to_netcdf(data, '/tmp/file.nc')` or `save_to_csv(data, '/tmp/file.csv')` to save files "
-        "(do NOT use `data.to_netcdf()` directly — it will fail on in-memory datasets). "
+        "Use `get_dataset('dataset_id')` to access loaded data, `store_dataset(data, 'desc')` to save results.\n"
+        "**For downloads**: Use `url = save_to_csv(data)` or `url = save_to_netcdf(data)` — "
+        "they return a download URL. Print the URL as a markdown link: `print(f'[Download CSV]({url})')`. "
+        "Do NOT use `data.to_netcdf()` or `data.to_csv()` directly — they will fail on in-memory datasets.\n"
         "Libraries available: xarray (xr), numpy (np), pandas (pd), matplotlib.pyplot (plt), scipy.\n"
         "Always use `print()` to show results. Prefer built-in tools for standard operations.\n\n"
 
@@ -1222,6 +1347,9 @@ async def _stream_chat(messages: list[dict], dataset_id: str | None):
                     args = json.loads(tc["arguments"])
                 except json.JSONDecodeError:
                     args = {}
+
+                # Normalize common LLM argument mistakes
+                args = _normalize_tool_args(tool_name, args)
 
                 input_ids = _extract_dataset_ids_from_args(args)
                 yield _sse_event("tool_start", {
@@ -1407,6 +1535,7 @@ async def _azure_chat(message: str, dataset_id: str | None) -> dict[str, Any]:
             for tool_call in assistant_message.tool_calls:
                 tool_name = tool_call.function.name
                 args = json.loads(tool_call.function.arguments)
+                args = _normalize_tool_args(tool_name, args)
                 impl = _CHAT_TOOL_IMPLS.get(tool_name)
                 if impl is None:
                     tool_result = {"error": f"Unknown tool: {tool_name}"}
@@ -1643,6 +1772,87 @@ async def health_check() -> dict[str, Any]:
         "status": "healthy",
         "service": "rcmes-api",
         "datasets_loaded": len(datasets),
+    }
+
+
+# ============================================================================
+# Temporary Download Links
+# ============================================================================
+
+
+@app.get("/api/downloads/{token}/{filename}")
+async def serve_download(token: str, filename: str):
+    """Serve a temporary download file by token."""
+    _cleanup_expired_downloads()
+
+    info = _download_registry.get(token)
+    if info is None:
+        raise HTTPException(status_code=404, detail="Download link expired or not found")
+
+    filepath = Path(info["filepath"])
+    if not filepath.exists():
+        _download_registry.pop(token, None)
+        raise HTTPException(status_code=404, detail="File no longer available")
+
+    return FileResponse(
+        filepath,
+        media_type=info["media_type"],
+        filename=info["filename"],
+        headers={"Content-Disposition": f'attachment; filename="{info["filename"]}"'},
+    )
+
+
+@app.get("/api/download-dataset/{dataset_id}")
+async def download_dataset_direct(dataset_id: str, format: str = "csv"):
+    """Generate a temporary download link for a loaded dataset.
+
+    Returns a JSON object with a download URL that can be shared.
+    """
+    try:
+        ds = session_manager.get(dataset_id)
+        metadata = session_manager.get_metadata(dataset_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    from rcmes_mcp.utils.validation import check_download_size
+    try:
+        check_download_size(ds)
+    except ValueError as e:
+        raise HTTPException(status_code=413, detail=str(e))
+
+    if hasattr(ds, 'compute'):
+        ds = ds.compute()
+
+    var_name = metadata.variable or "data"
+    model_name = metadata.model or "model"
+
+    if format == "netcdf":
+        filename = f"{var_name}_{model_name}_{dataset_id}.nc"
+        filepath = DOWNLOADS_DIR / filename
+        if isinstance(ds, xr.DataArray):
+            ds = ds.to_dataset(name=var_name)
+        ds.to_netcdf(filepath, engine='scipy')
+        media_type = "application/x-netcdf"
+    elif format == "csv":
+        filename = f"{var_name}_{model_name}_{dataset_id}.csv"
+        filepath = DOWNLOADS_DIR / filename
+        if isinstance(ds, xr.DataArray):
+            df = ds.to_dataframe().reset_index()
+        else:
+            df = ds.to_dataframe().reset_index()
+        df.to_csv(filepath, index=False)
+        media_type = "text/csv"
+    else:
+        raise HTTPException(status_code=400, detail="Format must be 'netcdf' or 'csv'")
+
+    url = _create_download_link(filepath, filename, media_type)
+
+    return {
+        "success": True,
+        "download_url": url,
+        "filename": filename,
+        "format": format,
+        "expires_in_hours": _DOWNLOAD_TTL_HOURS,
     }
 
 

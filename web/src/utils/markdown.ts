@@ -38,6 +38,14 @@ export function formatMarkdown(text: string): string {
   return result.join('\n')
     .replace(/## (.*?)(\n|$)/g, '<h3>$1</h3>')
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    // Markdown links: [text](url) → clickable <a> tags
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, text, url) => {
+      // For download links, add download attribute
+      if (url.includes('/api/downloads/')) {
+        return `<a href="${url}" class="download-link" download>${text}</a>`;
+      }
+      return `<a href="${url}" target="_blank" rel="noopener">${text}</a>`;
+    })
     .replace(/`(.*?)`/g, '<code>$1</code>')
     .replace(/\n/g, '<br />');
 }

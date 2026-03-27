@@ -118,6 +118,18 @@ def _cache_subset(cache_key: str, ds: xr.Dataset) -> None:
         pass  # Caching failures shouldn't break the main flow
 
 
+def _background_cache(cache_key: str, ds: xr.Dataset) -> None:
+    """Schedule caching in a background thread so load_climate_data returns instantly."""
+    def _do_cache():
+        try:
+            _cache_subset(cache_key, ds)
+            logger.info(f"Background cache complete for {cache_key}")
+        except Exception:
+            pass  # Best-effort
+    t = threading.Thread(target=_do_cache, daemon=True)
+    t.start()
+
+
 def _precompute_stats(cache_key: str, ds: xr.Dataset) -> None:
     """Pre-compute basic statistics and save as JSON next to the cached subset."""
     try:
@@ -443,9 +455,9 @@ def load_climate_data(
             _progress(3, TOTAL_STEPS, f"Subsetting {start_date} to {end_date}...")
             ds = ds.sel(time=slice(start_date, end_date))
 
-            # Step 4: Cache the subset
-            _progress(4, TOTAL_STEPS, "Caching result to disk (compressed)...")
-            _cache_subset(cache_key, ds)
+            # Step 4: Schedule background caching (non-blocking)
+            _progress(4, TOTAL_STEPS, "Ready (caching in background)...")
+            _background_cache(cache_key, ds)
 
         # Step 5: Store in session
         _progress(5, TOTAL_STEPS, "Storing in session...")
@@ -503,9 +515,27 @@ def load_climate_data(
     except FileNotFoundError as e:
         logger.error(f"Data not found: {e}", extra={"tool": "load_climate_data", "error": str(e)})
         return {"error": str(e)}
+    except PermissionError as e:
+        logger.error(f"S3 access error: {e}", extra={"tool": "load_climate_data", "error": str(e)})
+        return {
+            "error": f"S3 access denied — this usually means the data server is unreachable from this network. "
+                     f"Try using pre-downloaded local data (RCMES_LOCAL_DATA_DIR) or run 'rcmes-warmup' from a machine with S3 access.",
+        }
     except Exception as e:
+        err_str = str(e)
+        # Provide helpful context for common network errors
+        if "Access Denied" in err_str or "PermissionError" in err_str:
+            err_str = (
+                f"S3 access denied — the data server may be unreachable from this network. "
+                f"Try using pre-downloaded local data (RCMES_LOCAL_DATA_DIR) or run 'rcmes-warmup' from a machine with S3 access."
+            )
+        elif "timed out" in err_str.lower() or "timeout" in err_str.lower():
+            err_str = (
+                f"Connection to S3 timed out — the data server may be unreachable from this network. "
+                f"Try using pre-downloaded local data (RCMES_LOCAL_DATA_DIR)."
+            )
         logger.exception(f"Failed to load data: {e}", extra={"tool": "load_climate_data", "error": str(e)})
-        return {"error": f"Failed to load data: {str(e)}"}
+        return {"error": f"Failed to load data: {err_str}"}
 
 
 @mcp.tool()

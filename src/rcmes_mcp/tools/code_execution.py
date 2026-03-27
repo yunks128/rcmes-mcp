@@ -116,27 +116,85 @@ def _store_dataset(data, description: str = "custom analysis result", variable: 
     return dataset_id
 
 
-def _save_to_netcdf(data, filepath: str):
-    """Save xarray data to NetCDF, handling in-memory datasets correctly."""
+def _get_downloads_dir():
+    """Get the downloads directory, creating if needed."""
+    from pathlib import Path
+    import os
+    downloads_dir = Path(os.environ.get("RCMES_DOWNLOADS_DIR", Path.home() / ".rcmes" / "downloads"))
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+    return downloads_dir
+
+
+def _save_to_netcdf(data, filepath: str | None = None):
+    """Save xarray data to NetCDF and return a download URL.
+
+    Args:
+        data: xarray Dataset or DataArray
+        filepath: Optional custom path. If None, auto-generates in downloads dir.
+
+    Returns:
+        Download URL string
+    """
     import xarray as xr
+    from pathlib import Path
     if hasattr(data, 'compute'):
         data = data.compute()
     if isinstance(data, xr.DataArray):
         data = data.to_dataset(name=data.name or "data")
-    data.to_netcdf(filepath, engine='scipy')
-    return filepath
+
+    if filepath is None:
+        import uuid
+        filepath = str(_get_downloads_dir() / f"export_{uuid.uuid4().hex[:8]}.nc")
+
+    outpath = Path(filepath)
+    # Save to downloads dir for serving
+    downloads_dir = _get_downloads_dir()
+    serve_path = downloads_dir / outpath.name
+    data.to_netcdf(serve_path, engine='scipy')
+
+    # Register for download
+    try:
+        from rcmes_mcp.api import _create_download_link
+        url = _create_download_link(serve_path, outpath.name, "application/x-netcdf")
+        return url
+    except Exception:
+        return str(serve_path)
 
 
-def _save_to_csv(data, filepath: str):
-    """Save xarray data to CSV."""
+def _save_to_csv(data, filepath: str | None = None):
+    """Save xarray/pandas data to CSV and return a download URL.
+
+    Args:
+        data: xarray Dataset, DataArray, or pandas DataFrame
+        filepath: Optional custom path. If None, auto-generates in downloads dir.
+
+    Returns:
+        Download URL string
+    """
+    from pathlib import Path
     if hasattr(data, 'compute'):
         data = data.compute()
     if hasattr(data, 'to_dataframe'):
         df = data.to_dataframe().reset_index()
     else:
         df = data
-    df.to_csv(filepath, index=False)
-    return filepath
+
+    if filepath is None:
+        import uuid
+        filepath = str(_get_downloads_dir() / f"export_{uuid.uuid4().hex[:8]}.csv")
+
+    outpath = Path(filepath)
+    downloads_dir = _get_downloads_dir()
+    serve_path = downloads_dir / outpath.name
+    df.to_csv(serve_path, index=False)
+
+    # Register for download
+    try:
+        from rcmes_mcp.api import _create_download_link
+        url = _create_download_link(serve_path, outpath.name, "text/csv")
+        return url
+    except Exception:
+        return str(serve_path)
 
 
 def execute_python_code(code: str) -> dict:

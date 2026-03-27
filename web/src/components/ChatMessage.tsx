@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback } from 'react';
+import React, { useMemo, useState, useCallback, useRef } from 'react';
 import type { ChatMessage as ChatMessageType, ToolStatus } from '../types/events';
 import { formatMarkdown } from '../utils/markdown';
 
@@ -267,9 +267,9 @@ export default function ChatMessage({ message, onImageClick, onOptionSelect, isL
         <div className="chat-msg-avatar">AI</div>
       )}
       <div className="chat-msg-body">
-        {/* Tool execution badges */}
+        {/* Tool execution pipeline (resizable) */}
         {tools.length > 0 && (
-          <div className="chat-msg-tools">
+          <ResizableToolPanel>
             {tools.map(tool => (
               tool.tool_name === 'execute_python_code' ? (
                 <div key={tool.tool_call_id} className={`code-exec-badge code-exec-badge--${tool.status}`}>
@@ -346,7 +346,7 @@ export default function ChatMessage({ message, onImageClick, onOptionSelect, isL
                 </div>
               )
             ))}
-          </div>
+          </ResizableToolPanel>
         )}
 
         {/* Text content */}
@@ -404,6 +404,65 @@ export default function ChatMessage({ message, onImageClick, onOptionSelect, isL
     </div>
   );
 }
+
+function ResizableToolPanel({ children }: { children: React.ReactNode }) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [height, setHeight] = useState<number | null>(null);
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  const dragging = useRef(false);
+  const startY = useRef(0);
+  const startH = useRef(0);
+
+  const onMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    dragging.current = true;
+    startY.current = e.clientY;
+    startH.current = panelRef.current?.offsetHeight || 200;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!dragging.current) return;
+      const delta = ev.clientY - startY.current;
+      const newH = Math.max(48, startH.current + delta);
+      setHeight(newH);
+    };
+    const onMouseUp = () => {
+      dragging.current = false;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, []);
+
+  const toggleCollapse = useCallback(() => {
+    setIsCollapsed(prev => !prev);
+  }, []);
+
+  return (
+    <div
+      ref={panelRef}
+      className={`chat-msg-tools ${isCollapsed ? 'chat-msg-tools--collapsed' : ''}`}
+      style={!isCollapsed && height ? { height, maxHeight: height } : undefined}
+    >
+      <div className="tools-panel-controls">
+        <button className="tools-panel-toggle" onClick={toggleCollapse} title={isCollapsed ? 'Expand' : 'Collapse'}>
+          {isCollapsed ? '\u25B6' : '\u25BC'} Tools ({React.Children.count(children)})
+        </button>
+      </div>
+      {!isCollapsed && (
+        <>
+          <div className="tools-panel-content">
+            {children}
+          </div>
+          <div className="tools-panel-resize-handle" onMouseDown={onMouseDown} title="Drag to resize">
+            <span className="tools-panel-resize-grip" />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 
 function MultiSelectOptions({ groups, onSubmit }: { groups: OptionGroup[]; onSubmit: (option: string) => void }) {
   const [selected, setSelected] = useState<Record<string, string>>({});
