@@ -33,17 +33,32 @@ from rcmes_mcp.utils.cloud import (
 
 logger = logging.getLogger("rcmes.warmup")
 
-# Popular pre-defined regions
+# Pre-defined regions — matches the chat UI guided selection menu
 REGIONS = {
+    "california": {
+        "name": "California",
+        "lat_min": 32.0, "lat_max": 42.0,
+        "lon_min": -124.0, "lon_max": -114.0,
+    },
+    "texas": {
+        "name": "Texas",
+        "lat_min": 25.5, "lat_max": 36.5,
+        "lon_min": -106.5, "lon_max": -93.5,
+    },
+    "thailand": {
+        "name": "Thailand",
+        "lat_min": 5.5, "lat_max": 20.5,
+        "lon_min": 97.0, "lon_max": 106.0,
+    },
+    "florida": {
+        "name": "Florida",
+        "lat_min": 24.5, "lat_max": 31.0,
+        "lon_min": -87.5, "lon_max": -80.0,
+    },
     "conus": {
         "name": "Continental US",
         "lat_min": 24.0, "lat_max": 50.0,
         "lon_min": -125.0, "lon_max": -66.0,
-    },
-    "california": {
-        "name": "California",
-        "lat_min": 32.0, "lat_max": 42.0,
-        "lon_min": -124.5, "lon_max": -114.0,
     },
     "europe": {
         "name": "Europe",
@@ -62,15 +77,29 @@ REGIONS = {
     },
 }
 
-# Default warmup configuration — popular combos that cover common use cases
-DEFAULT_MODELS = ["ACCESS-CM2", "CESM2", "GFDL-ESM4", "MPI-ESM1-2-HR", "UKESM1-0-LL"]
-DEFAULT_SCENARIOS = ["historical", "ssp245", "ssp585"]
-DEFAULT_VARIABLES = ["tas", "tasmax", "pr"]
-DEFAULT_REGIONS = ["conus", "california"]
-DEFAULT_YEARS = {
-    "historical": (2000, 2014),
-    "ssp245": (2040, 2060),
-    "ssp585": (2040, 2060),
+# ============================================================================
+# Default warmup config — matches the chat UI guided selection menus exactly
+# ============================================================================
+
+# The 5 models suggested in the chat flow
+DEFAULT_MODELS = ["ACCESS-CM2", "GFDL-ESM4", "MRI-ESM2-0", "CanESM5", "CESM2"]
+
+# All 4 future scenarios + historical
+DEFAULT_SCENARIOS = ["historical", "ssp126", "ssp245", "ssp370", "ssp585"]
+
+# The 4 variables suggested in the chat flow
+DEFAULT_VARIABLES = ["tasmax", "tasmin", "pr", "tas"]
+
+# The 3 regions most commonly selected (California, Texas, Thailand)
+DEFAULT_REGIONS = ["california", "texas", "thailand"]
+
+# Time ranges split into decades for manageable download sizes (~30s each)
+DEFAULT_YEAR_RANGES = {
+    "historical": [(2000, 2009), (2010, 2014)],
+    "ssp126": [(2020, 2029), (2030, 2039), (2040, 2049), (2050, 2059)],
+    "ssp245": [(2020, 2029), (2030, 2039), (2040, 2049), (2050, 2059)],
+    "ssp370": [(2020, 2029), (2030, 2039), (2040, 2049), (2050, 2059)],
+    "ssp585": [(2020, 2029), (2030, 2039), (2040, 2049), (2050, 2059)],
 }
 
 
@@ -105,84 +134,118 @@ def warmup_kerchunk_refs(
     return count
 
 
+def _download_one(combo, year_ranges, dry_run=False):
+    """Download and cache a single subset. Returns (label, status, elapsed)."""
+    from rcmes_mcp.tools.data_access import _cache_subset, _get_subset_cache_key, _get_cached_subset
+
+    region_key, region, model, scenario, variable, (start_yr, end_yr) = combo
+    label = f"{variable}/{model}/{scenario} @ {region['name']} ({start_yr}-{end_yr})"
+
+    lon_min_360 = region["lon_min"] if region["lon_min"] >= 0 else 360 + region["lon_min"]
+    lon_max_360 = region["lon_max"] if region["lon_max"] >= 0 else 360 + region["lon_max"]
+
+    cache_key = _get_subset_cache_key(
+        variable, model, scenario,
+        f"{start_yr}-01-01", f"{end_yr}-12-31",
+        region["lat_min"], region["lat_max"],
+        lon_min_360, lon_max_360,
+    )
+
+    if _get_cached_subset(cache_key) is not None:
+        return (label, "cached", 0)
+
+    if dry_run:
+        return (label, "dry-run", 0)
+
+    t0 = time.perf_counter()
+    try:
+        if lon_min_360 >= lon_max_360:
+            lon_bounds = None
+        else:
+            lon_bounds = (lon_min_360, lon_max_360)
+
+        ds = open_nex_gddp_dataset(
+            variable=variable,
+            model=model,
+            scenario=scenario,
+            start_year=start_yr,
+            end_year=end_yr,
+            lat_bounds=(region["lat_min"], region["lat_max"]),
+            lon_bounds=lon_bounds,
+        )
+        ds = ds.sel(time=slice(f"{start_yr}-01-01", f"{end_yr}-12-31"))
+        ds = ds.compute()
+        _cache_subset(cache_key, ds)
+        elapsed = time.perf_counter() - t0
+        return (label, "done", elapsed)
+    except Exception as e:
+        elapsed = time.perf_counter() - t0
+        return (label, f"FAILED: {e}", elapsed)
+
+
 def warmup_subsets(
     models: list[str],
     scenarios: list[str],
     variables: list[str],
     regions: dict[str, dict],
-    year_ranges: dict[str, tuple[int, int]],
+    year_ranges: dict[str, list[tuple[int, int]]],
     dry_run: bool = False,
+    parallel: int = 1,
 ) -> int:
     """Pre-download and cache data subsets.
 
     Returns number of subsets cached.
     """
-    from rcmes_mcp.tools.data_access import _cache_subset, _get_subset_cache_key, _get_cached_subset
+    pass  # imports are inline below for parallel mode
 
     combos = []
     for region_key, region in regions.items():
         for model in models:
             for scenario in scenarios:
                 for variable in variables:
-                    years = year_ranges.get(scenario, (2000, 2014))
-                    combos.append((region_key, region, model, scenario, variable, years))
+                    for yr_range in year_ranges.get(scenario, [(2000, 2014)]):
+                        combos.append((region_key, region, model, scenario, variable, yr_range))
 
     total = len(combos)
     cached = 0
     skipped = 0
+    failed = 0
 
-    for i, (region_key, region, model, scenario, variable, (start_yr, end_yr)) in enumerate(combos):
-        label = f"[{i+1}/{total}] {variable}/{model}/{scenario} @ {region['name']} ({start_yr}-{end_yr})"
-
-        # Convert longitudes to 0-360 for cache key
-        lon_min_360 = region["lon_min"] if region["lon_min"] >= 0 else 360 + region["lon_min"]
-        lon_max_360 = region["lon_max"] if region["lon_max"] >= 0 else 360 + region["lon_max"]
-
-        cache_key = _get_subset_cache_key(
-            variable, model, scenario,
-            f"{start_yr}-01-01", f"{end_yr}-12-31",
-            region["lat_min"], region["lat_max"],
-            lon_min_360, lon_max_360,
-        )
-
-        # Skip if already cached
-        if _get_cached_subset(cache_key) is not None:
-            print(f"  (cached) {label}")
+    def _print_result(idx, result_label, status, elapsed):
+        nonlocal cached, skipped, failed
+        if status == "cached":
+            print(f"  [{idx}/{total}] (cached) {result_label}")
             skipped += 1
-            continue
-
-        if dry_run:
-            print(f"  (dry-run) Would download: {label}")
-            continue
-
-        print(f"  Downloading: {label} ...", end=" ", flush=True)
-        t0 = time.perf_counter()
-        try:
-            # Handle wrap-around longitudes
-            if lon_min_360 >= lon_max_360:
-                lon_bounds = None
-            else:
-                lon_bounds = (lon_min_360, lon_max_360)
-
-            ds = open_nex_gddp_dataset(
-                variable=variable,
-                model=model,
-                scenario=scenario,
-                start_year=start_yr,
-                end_year=end_yr,
-                lat_bounds=(region["lat_min"], region["lat_max"]),
-                lon_bounds=lon_bounds,
-            )
-            ds = ds.sel(time=slice(f"{start_yr}-01-01", f"{end_yr}-12-31"))
-
-            # Materialize and cache (with compression + stats pre-computation)
-            _cache_subset(cache_key, ds)
-            elapsed = time.perf_counter() - t0
-            print(f"done ({elapsed:.1f}s)")
+        elif status == "dry-run":
+            print(f"  [{idx}/{total}] (dry-run) {result_label}")
+        elif status == "done":
+            print(f"  [{idx}/{total}] done ({elapsed:.1f}s) {result_label}")
             cached += 1
-        except Exception as e:
-            print(f"FAILED: {e}")
+        else:
+            print(f"  [{idx}/{total}] {status} — {result_label}")
+            failed += 1
 
+    if parallel <= 1:
+        for i, combo in enumerate(combos):
+            result_label, status, elapsed = _download_one(combo, year_ranges, dry_run)
+            _print_result(i + 1, result_label, status, elapsed)
+    else:
+        # Use ProcessPoolExecutor — Dask is not thread-safe for concurrent compute()
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        print(f"  Using {parallel} parallel processes")
+        done_count = 0
+        with ProcessPoolExecutor(max_workers=parallel) as pool:
+            futures = {
+                pool.submit(_download_one, combo, year_ranges, dry_run): i
+                for i, combo in enumerate(combos)
+            }
+            for future in as_completed(futures):
+                done_count += 1
+                result_label, status, elapsed = future.result()
+                _print_result(done_count, result_label, status, elapsed)
+
+    if failed:
+        print(f"\n  Warning: {failed} downloads failed")
     return cached
 
 
@@ -219,6 +282,10 @@ def main():
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Show what would be downloaded without actually downloading",
+    )
+    parser.add_argument(
+        "--parallel", "-j", type=int, default=1,
+        help="Number of parallel downloads (default: 1, max recommended: 4)",
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true",
@@ -279,7 +346,8 @@ def main():
     t0 = time.perf_counter()
     cached_count = warmup_subsets(
         models, scenarios, variables, regions,
-        DEFAULT_YEARS, dry_run=args.dry_run,
+        DEFAULT_YEAR_RANGES, dry_run=args.dry_run,
+        parallel=args.parallel,
     )
     elapsed = time.perf_counter() - t0
     print(f"\n    Cached {cached_count} new subsets in {elapsed:.1f}s")

@@ -30,9 +30,14 @@ def _progress(step: int, total: int, detail: str):
 
 
 def _ensure_materialized(dataset_id: str):
-    """Wait for background materialization if in progress."""
-    from rcmes_mcp.tools.data_access import wait_for_materialization
-    wait_for_materialization(dataset_id)
+    """Wait for background materialization if in progress, with progress updates."""
+    from rcmes_mcp.tools.data_access import _materialization_events
+    event = _materialization_events.get(dataset_id)
+    if event is None:
+        return
+    _progress(0, 0, "Downloading data from S3 (one-time)...")
+    while not event.wait(timeout=3.0):
+        _progress(0, 0, "Still downloading from S3...")
 
 # ETCCDI indices documentation
 TEMPERATURE_INDICES = {

@@ -32,9 +32,15 @@ def _progress(step: int, total: int, detail: str):
 
 
 def _ensure_materialized(dataset_id: str):
-    """Wait for background materialization if in progress."""
-    from rcmes_mcp.tools.data_access import wait_for_materialization
-    wait_for_materialization(dataset_id)
+    """Wait for background materialization if in progress, with progress updates."""
+    from rcmes_mcp.tools.data_access import _materialization_events
+    event = _materialization_events.get(dataset_id)
+    if event is None:
+        return  # Already materialized or no pending work
+    _progress(0, 0, "Downloading data from S3 (one-time)...")
+    # Poll with progress heartbeats so the UI stays updated
+    while not event.wait(timeout=3.0):
+        _progress(0, 0, "Still downloading from S3...")
 
 
 @mcp.tool()
@@ -53,11 +59,7 @@ def calculate_statistics(
     Returns:
         Dictionary with computed statistics
     """
-    # Wait for background materialization if in progress — this ensures
-    # we operate on in-memory data instead of re-downloading from S3
-    from rcmes_mcp.tools.data_access import wait_for_materialization
-    _progress(1, 4, "Waiting for data materialization...")
-    wait_for_materialization(dataset_id)
+    _ensure_materialized(dataset_id)
 
     try:
         ds = session_manager.get(dataset_id)
@@ -80,7 +82,7 @@ def calculate_statistics(
     try:
         if statistic == "all":
             # Single compute pass for all basic stats
-            _progress(2, 4, "Computing mean, std, min, max...")
+            _progress(1, 3, "Computing mean, std, min, max...")
             import dask
             mean_val, std_val, min_val, max_val = dask.compute(
                 data.mean(), data.std(), data.min(), data.max()
@@ -91,7 +93,7 @@ def calculate_statistics(
             results["max"] = float(max_val)
 
             # Compute percentiles (subsample for large datasets)
-            _progress(3, 4, "Computing percentiles...")
+            _progress(2, 3, "Computing percentiles...")
             sample = data.values.flatten()
             if len(sample) > 1000000:
                 sample = np.random.choice(sample[~np.isnan(sample)], 1000000)
@@ -102,7 +104,7 @@ def calculate_statistics(
                 "p75": float(np.nanpercentile(sample, 75)),
                 "p95": float(np.nanpercentile(sample, 95)),
             }
-            _progress(4, 4, "Statistics complete")
+            _progress(3, 3, "Statistics complete")
         else:
             if statistic == "mean":
                 results["mean"] = float(data.mean().compute())
