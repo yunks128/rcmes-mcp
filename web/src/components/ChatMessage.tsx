@@ -10,17 +10,24 @@ interface ChatMessageProps {
 }
 
 const STATUS_LABELS: Record<ToolStatus, string> = {
-  pending: 'Pending',
-  running: 'Running...',
-  done: 'Done',
-  error: 'Error',
+  pending: 'Queued',
+  running: 'Running',
+  done: 'Completed',
+  error: 'Failed',
+};
+
+const STATUS_ICONS: Record<ToolStatus, string> = {
+  pending: '\u25CB',   // ○
+  running: '\u25D4',   // ◔
+  done: '\u2713',      // ✓
+  error: '\u2717',     // ✗
 };
 
 const STATUS_COLORS: Record<ToolStatus, string> = {
   pending: '#9e9e9e',
   running: '#1976d2',
-  done: '#4caf50',
-  error: '#f44336',
+  done: '#2e7d32',
+  error: '#c62828',
 };
 
 function toolDisplayName(name: string): string {
@@ -299,49 +306,43 @@ export default function ChatMessage({ message, onImageClick, onOptionSelect, isL
                 <div
                   key={tool.tool_call_id}
                   className={`tool-badge tool-badge--${tool.status}`}
-                  style={{ borderLeftColor: STATUS_COLORS[tool.status] }}
                 >
-                  <div className="tool-badge-header">
+                  <div className="tool-badge-row">
+                    <span className="tool-badge-icon" style={{ color: STATUS_COLORS[tool.status] }}>
+                      {tool.status === 'running' ? <span className="tool-badge-spinner" /> : STATUS_ICONS[tool.status]}
+                    </span>
                     <span className="tool-badge-name">{toolDisplayName(tool.tool_name)}</span>
                     <span className="tool-badge-status" style={{ color: STATUS_COLORS[tool.status] }}>
                       {STATUS_LABELS[tool.status]}
                     </span>
+                    {tool.duration_ms != null && tool.status !== 'running' && (
+                      <span className="tool-badge-time">
+                        {tool.duration_ms < 1000 ? `${tool.duration_ms}ms` : `${(tool.duration_ms / 1000).toFixed(1)}s`}
+                      </span>
+                    )}
                   </div>
-                  {tool.result_summary && tool.status === 'done' && (
-                    <div className="tool-badge-summary" dangerouslySetInnerHTML={{ __html: formatMarkdown(tool.result_summary) }} />
-                  )}
                   {tool.progress && tool.status === 'running' && (
                     <div className="tool-badge-progress">
-                      <div className="tool-badge-progress-detail">
-                        {tool.progress.detail || `Step ${tool.progress.completed}/${tool.progress.total}`}
-                      </div>
                       <div className="tool-badge-progress-bar-track">
                         {tool.progress.total > 0 ? (
                           <div
                             className="tool-badge-progress-bar-fill"
-                            style={{
-                              width: `${(tool.progress.completed / tool.progress.total) * 100}%`,
-                              background: STATUS_COLORS[tool.status],
-                            }}
+                            style={{ width: `${(tool.progress.completed / tool.progress.total) * 100}%` }}
                           />
                         ) : (
                           <div className="tool-badge-progress-bar-indeterminate" />
                         )}
                       </div>
-                      {tool.progress.total > 0 && (
-                        <div className="tool-badge-progress-step">
-                          {tool.progress.completed}/{tool.progress.total}
-                        </div>
-                      )}
+                      <span className="tool-badge-progress-detail">
+                        {tool.progress.detail || `Step ${tool.progress.completed}/${tool.progress.total}`}
+                      </span>
                     </div>
+                  )}
+                  {tool.result_summary && tool.status === 'done' && (
+                    <div className="tool-badge-summary" dangerouslySetInnerHTML={{ __html: formatMarkdown(tool.result_summary) }} />
                   )}
                   {tool.error && (
                     <div className="tool-badge-error">{tool.error}</div>
-                  )}
-                  {tool.duration_ms != null && tool.status !== 'running' && (
-                    <div className="tool-badge-time">
-                      {tool.duration_ms < 1000 ? `${tool.duration_ms}ms` : `${(tool.duration_ms / 1000).toFixed(1)}s`}
-                    </div>
                   )}
                 </div>
               )
@@ -438,23 +439,25 @@ function ResizableToolPanel({ children }: { children: React.ReactNode }) {
     setIsCollapsed(prev => !prev);
   }, []);
 
+  const count = React.Children.count(children);
+
   return (
     <div
       ref={panelRef}
-      className={`chat-msg-tools ${isCollapsed ? 'chat-msg-tools--collapsed' : ''}`}
+      className={`tools-panel ${isCollapsed ? 'tools-panel--collapsed' : ''}`}
       style={!isCollapsed && height ? { height, maxHeight: height } : undefined}
     >
-      <div className="tools-panel-controls">
-        <button className="tools-panel-toggle" onClick={toggleCollapse} title={isCollapsed ? 'Expand' : 'Collapse'}>
-          {isCollapsed ? '\u25B6' : '\u25BC'} Tools ({React.Children.count(children)})
-        </button>
-      </div>
+      <button className="tools-panel-header" onClick={toggleCollapse}>
+        <span className="tools-panel-chevron">{isCollapsed ? '\u25B8' : '\u25BE'}</span>
+        <span className="tools-panel-title">Tool Execution</span>
+        <span className="tools-panel-count">{count}</span>
+      </button>
       {!isCollapsed && (
         <>
           <div className="tools-panel-content">
             {children}
           </div>
-          <div className="tools-panel-resize-handle" onMouseDown={onMouseDown} title="Drag to resize">
+          <div className="tools-panel-resize-handle" onMouseDown={onMouseDown}>
             <span className="tools-panel-resize-grip" />
           </div>
         </>

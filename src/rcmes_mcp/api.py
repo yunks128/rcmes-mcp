@@ -1885,7 +1885,11 @@ if STATIC_DIR.exists():
         if file_path.exists() and file_path.is_file():
             return FileResponse(file_path)
         # Fall back to index.html for client-side routing
-        return FileResponse(STATIC_DIR / "index.html")
+        # Always serve index.html with no-cache so browsers pick up new asset hashes
+        return FileResponse(
+            STATIC_DIR / "index.html",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
 
 
 def main():
