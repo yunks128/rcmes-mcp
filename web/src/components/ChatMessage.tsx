@@ -24,10 +24,10 @@ const STATUS_ICONS: Record<ToolStatus, string> = {
 };
 
 const STATUS_COLORS: Record<ToolStatus, string> = {
-  pending: '#9e9e9e',
-  running: '#1976d2',
-  done: '#2e7d32',
-  error: '#c62828',
+  pending: '#9ca3af',
+  running: '#0f4c81',
+  done: '#1a7f37',
+  error: '#c4321c',
 };
 
 function toolDisplayName(name: string): string {

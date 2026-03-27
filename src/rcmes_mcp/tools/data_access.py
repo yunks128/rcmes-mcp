@@ -118,16 +118,51 @@ def _cache_subset(cache_key: str, ds: xr.Dataset) -> None:
         pass  # Caching failures shouldn't break the main flow
 
 
-def _background_cache(cache_key: str, ds: xr.Dataset) -> None:
-    """Schedule caching in a background thread so load_climate_data returns instantly."""
+# Track pending background materializations: dataset_id -> threading.Event
+_materialization_events: dict[str, threading.Event] = {}
+
+
+def _background_cache(cache_key: str, ds: xr.Dataset, dataset_id: str | None = None) -> None:
+    """Materialize, cache to disk, and update session with in-memory data.
+
+    After this completes, the session holds a fully materialized (in-memory)
+    dataset, so subsequent tool calls (stats, viz, download) are instant.
+    """
+    done_event = threading.Event()
+    if dataset_id:
+        _materialization_events[dataset_id] = done_event
+
     def _do_cache():
         try:
-            _cache_subset(cache_key, ds)
-            logger.info(f"Background cache complete for {cache_key}")
-        except Exception:
-            pass  # Best-effort
+            # Materialize the lazy dataset (this is the S3 download)
+            materialized = ds.compute()
+            logger.info(f"Background materialization complete for {cache_key}")
+
+            # Swap the lazy dataset in the session with the materialized one
+            if dataset_id and dataset_id in session_manager._datasets:
+                session_manager._datasets[dataset_id] = materialized
+                logger.info(f"Session updated with materialized data for {dataset_id}")
+
+            # Cache to disk (from memory now, no second S3 hit)
+            _cache_subset(cache_key, materialized)
+            logger.info(f"Background disk cache complete for {cache_key}")
+        except Exception as e:
+            logger.warning(f"Background cache failed for {cache_key}: {e}")
+        finally:
+            done_event.set()
+            _materialization_events.pop(dataset_id, None)
+
     t = threading.Thread(target=_do_cache, daemon=True)
     t.start()
+
+
+def wait_for_materialization(dataset_id: str, timeout: float = 600) -> bool:
+    """Wait for background materialization to finish. Returns True if done."""
+    event = _materialization_events.get(dataset_id)
+    if event is None:
+        return True  # No pending materialization
+    logger.info(f"Waiting for background materialization of {dataset_id}...")
+    return event.wait(timeout=timeout)
 
 
 def _precompute_stats(cache_key: str, ds: xr.Dataset) -> None:
@@ -455,12 +490,8 @@ def load_climate_data(
             _progress(3, TOTAL_STEPS, f"Subsetting {start_date} to {end_date}...")
             ds = ds.sel(time=slice(start_date, end_date))
 
-            # Step 4: Schedule background caching (non-blocking)
-            _progress(4, TOTAL_STEPS, "Ready (caching in background)...")
-            _background_cache(cache_key, ds)
-
-        # Step 5: Store in session
-        _progress(5, TOTAL_STEPS, "Storing in session...")
+        # Step 4: Store in session
+        _progress(4, TOTAL_STEPS, "Storing in session...")
         dataset_id = session_manager.store(
             data=ds,
             source=dataset,
@@ -469,6 +500,11 @@ def load_climate_data(
             scenario=scenario,
             description=f"{variable} from {model} ({scenario}) for {start_date} to {end_date}",
         )
+
+        # Step 5: Start background materialization (non-blocking)
+        if cached_ds is None:
+            _progress(5, TOTAL_STEPS, "Materializing in background...")
+            _background_cache(cache_key, ds, dataset_id=dataset_id)
 
         # Get shape info (triggers minimal data read)
         time_size = ds.dims.get("time", 0)

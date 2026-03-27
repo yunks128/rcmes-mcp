@@ -34,6 +34,12 @@ def _progress(step: int, total: int, detail: str):
     if cb:
         cb(step, total, detail)
 
+
+def _ensure_materialized(dataset_id: str):
+    """Wait for background materialization if in progress."""
+    from rcmes_mcp.tools.data_access import wait_for_materialization
+    wait_for_materialization(dataset_id)
+
 # Simple PNG cache directory
 _PLOT_CACHE_DIR = Path(tempfile.gettempdir()) / "rcmes_mcp_plot_cache"
 _PLOT_CACHE_DIR.mkdir(exist_ok=True)
@@ -122,6 +128,7 @@ def generate_map(
     """
     t0 = time.perf_counter()
 
+    _ensure_materialized(dataset_id)
     _progress(1, 4, "Checking plot cache...")
     # Check plot cache
     cache_key = _plot_cache_key(
@@ -286,6 +293,8 @@ def generate_timeseries_plot(
         return {"error": "No dataset IDs provided"}
 
     t0 = time.perf_counter()
+    for did in dataset_ids:
+        _ensure_materialized(did)
     total_steps = len(dataset_ids) + 2  # data steps + render + encode
 
     _progress(1, total_steps, "Checking plot cache...")

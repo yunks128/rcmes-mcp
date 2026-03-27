@@ -1,15 +1,16 @@
 :root {
-  --primary: #1976d2;
-  --primary-dark: #1565c0;
-  --secondary: #dc004e;
-  --background: #f5f5f5;
+  --primary: #0f4c81;
+  --primary-dark: #0a3a63;
+  --primary-light: #e8f0f8;
+  --secondary: #b33951;
+  --background: #f7f8fa;
   --surface: #ffffff;
-  --text-primary: #212121;
-  --text-secondary: #757575;
-  --border: #e0e0e0;
-  --success: #4caf50;
-  --error: #f44336;
-  --warning: #ff9800;
+  --text-primary: #1a1a2e;
+  --text-secondary: #6b7280;
+  --border: #e2e5ea;
+  --success: #1a7f37;
+  --error: #c4321c;
+  --warning: #d97706;
 }
 
 * {
@@ -659,7 +660,7 @@ body {
 }
 
 .tool-badge--running {
-  background: #f8fbff;
+  background: var(--primary-light);
 }
 
 .tool-badge--error {
@@ -805,7 +806,7 @@ body {
 
 .code-exec-label {
   font-weight: 600;
-  color: #7aafff;
+  color: #8ab4f8;
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.03em;

@@ -28,6 +28,12 @@ def _progress(step: int, total: int, detail: str):
     if cb:
         cb(step, total, detail)
 
+
+def _ensure_materialized(dataset_id: str):
+    """Wait for background materialization if in progress."""
+    from rcmes_mcp.tools.data_access import wait_for_materialization
+    wait_for_materialization(dataset_id)
+
 # ETCCDI indices documentation
 TEMPERATURE_INDICES = {
     "TXx": "Maximum of daily maximum temperature",
@@ -161,6 +167,7 @@ def calculate_etccdi_index(
         # Calculate maximum 5-day precipitation
         calculate_etccdi_index(dataset_id="ds_abc123", index="Rx5day", freq="YS")
     """
+    _ensure_materialized(dataset_id)
     try:
         ds = session_manager.get(dataset_id)
         metadata = session_manager.get_metadata(dataset_id)
@@ -335,6 +342,7 @@ def analyze_heatwaves(
     Returns:
         Heatwave statistics and new dataset_id with annual heatwave metrics
     """
+    _ensure_materialized(dataset_id)
     try:
         ds = session_manager.get(dataset_id)
         metadata = session_manager.get_metadata(dataset_id)

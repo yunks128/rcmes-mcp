@@ -31,6 +31,12 @@ def _progress(step: int, total: int, detail: str):
         cb(step, total, detail)
 
 
+def _ensure_materialized(dataset_id: str):
+    """Wait for background materialization if in progress."""
+    from rcmes_mcp.tools.data_access import wait_for_materialization
+    wait_for_materialization(dataset_id)
+
+
 @mcp.tool()
 def calculate_statistics(
     dataset_id: str,
@@ -47,6 +53,12 @@ def calculate_statistics(
     Returns:
         Dictionary with computed statistics
     """
+    # Wait for background materialization if in progress — this ensures
+    # we operate on in-memory data instead of re-downloading from S3
+    from rcmes_mcp.tools.data_access import wait_for_materialization
+    _progress(1, 4, "Waiting for data materialization...")
+    wait_for_materialization(dataset_id)
+
     try:
         ds = session_manager.get(dataset_id)
         metadata = session_manager.get_metadata(dataset_id)
@@ -68,7 +80,7 @@ def calculate_statistics(
     try:
         if statistic == "all":
             # Single compute pass for all basic stats
-            _progress(1, 3, "Computing mean, std, min, max...")
+            _progress(2, 4, "Computing mean, std, min, max...")
             import dask
             mean_val, std_val, min_val, max_val = dask.compute(
                 data.mean(), data.std(), data.min(), data.max()
@@ -79,7 +91,7 @@ def calculate_statistics(
             results["max"] = float(max_val)
 
             # Compute percentiles (subsample for large datasets)
-            _progress(2, 3, "Computing percentiles...")
+            _progress(3, 4, "Computing percentiles...")
             sample = data.values.flatten()
             if len(sample) > 1000000:
                 sample = np.random.choice(sample[~np.isnan(sample)], 1000000)
@@ -90,7 +102,7 @@ def calculate_statistics(
                 "p75": float(np.nanpercentile(sample, 75)),
                 "p95": float(np.nanpercentile(sample, 95)),
             }
-            _progress(3, 3, "Statistics complete")
+            _progress(4, 4, "Statistics complete")
         else:
             if statistic == "mean":
                 results["mean"] = float(data.mean().compute())
@@ -135,6 +147,7 @@ def calculate_climatology(
     Returns:
         New dataset_id containing climatology
     """
+    _ensure_materialized(dataset_id)
     try:
         ds = session_manager.get(dataset_id)
         metadata = session_manager.get_metadata(dataset_id)
@@ -188,6 +201,7 @@ def calculate_trend(
     Returns:
         Trend statistics including slope, p-value, and confidence intervals
     """
+    _ensure_materialized(dataset_id)
     try:
         ds = session_manager.get(dataset_id)
         metadata = session_manager.get_metadata(dataset_id)
@@ -304,6 +318,7 @@ def calculate_regional_mean(
     Returns:
         New dataset_id containing the regional mean time series
     """
+    _ensure_materialized(dataset_id)
     try:
         ds = session_manager.get(dataset_id)
         metadata = session_manager.get_metadata(dataset_id)
