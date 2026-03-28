@@ -45,9 +45,13 @@ def _ensure_materialized(dataset_id: str):
     while not event.wait(timeout=3.0):
         _progress(0, 0, "Still downloading from S3...")
 
-# Simple PNG cache directory
-_PLOT_CACHE_DIR = Path(tempfile.gettempdir()) / "rcmes_mcp_plot_cache"
-_PLOT_CACHE_DIR.mkdir(exist_ok=True)
+# PNG cache directory — use RCMES_CACHE_DIR (writable) instead of /tmp
+import os as _os
+_PLOT_CACHE_DIR = Path(_os.environ.get(
+    "RCMES_CACHE_DIR",
+    Path.home() / ".rcmes" / "cache",
+)) / "plot_cache"
+_PLOT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _plot_cache_key(**kwargs) -> str:
@@ -56,11 +60,20 @@ def _plot_cache_key(**kwargs) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+_PLOT_CACHE_TTL = 2 * 3600  # 2 hours
+
+
 def _get_cached_plot(cache_key: str) -> dict | None:
-    """Return cached plot result if available."""
+    """Return cached plot result if available and not expired."""
     png_path = _PLOT_CACHE_DIR / f"{cache_key}.png"
     meta_path = _PLOT_CACHE_DIR / f"{cache_key}.json"
     if png_path.exists() and meta_path.exists():
+        # Check TTL
+        age = time.time() - png_path.stat().st_mtime
+        if age > _PLOT_CACHE_TTL:
+            png_path.unlink(missing_ok=True)
+            meta_path.unlink(missing_ok=True)
+            return None
         with open(png_path, "rb") as f:
             img_base64 = base64.b64encode(f.read()).decode("utf-8")
         with open(meta_path) as f:
@@ -91,9 +104,9 @@ def _fig_to_base64(fig) -> str:
 
 
 def _save_fig(fig, filename: str) -> str:
-    """Save figure to temporary file and return path."""
-    temp_dir = Path(tempfile.gettempdir()) / "rcmes_mcp_plots"
-    temp_dir.mkdir(exist_ok=True)
+    """Save figure to writable directory and return path."""
+    temp_dir = _PLOT_CACHE_DIR.parent / "plots"
+    temp_dir.mkdir(parents=True, exist_ok=True)
     filepath = temp_dir / filename
     fig.savefig(filepath, format="png", dpi=150, bbox_inches="tight")
     return str(filepath)
