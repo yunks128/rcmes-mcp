@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import * as api from '../api';
 import type { Variable, Scenario, ModelInfo } from '../api';
 
@@ -12,6 +12,17 @@ export default function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [variables, setVariables] = useState<Variable[]>([]);
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [datasets, setDatasets] = useState<api.Dataset[]>([]);
+  const closeBtnRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    closeBtnRef.current?.focus();
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
 
   useEffect(() => {
     if (!open) return;
@@ -31,10 +42,23 @@ export default function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   return (
     <>
       {open && <div className="drawer-backdrop" onClick={onClose} />}
-      <div className={`settings-drawer ${open ? 'open' : ''}`}>
+      <div
+        className={`settings-drawer ${open ? 'open' : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-drawer-title"
+        aria-hidden={!open}
+      >
         <div className="drawer-header">
-          <h2>Settings & Data</h2>
-          <button className="drawer-close" onClick={onClose}>&times;</button>
+          <h2 id="settings-drawer-title">Settings & Data</h2>
+          <button
+            ref={closeBtnRef}
+            className="drawer-close"
+            onClick={onClose}
+            aria-label="Close settings"
+          >
+            &times;
+          </button>
         </div>
 
         <div className="drawer-content">
