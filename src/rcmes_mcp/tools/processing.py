@@ -672,3 +672,84 @@ def mask_by_country(
         "original_dataset_id": dataset_id,
         "country": country_name,
     }
+
+
+@mcp.tool()
+def calculate_standardized_anomaly(
+    dataset_id: str,
+    baseline_start: str,
+    baseline_end: str,
+    period: str = "dayofyear",
+) -> dict:
+    """
+    Calculate standardized (z-score) anomalies relative to a baseline climatology.
+
+    z = (value - mean) / std, computed per day-of-year, month, or season using the
+    baseline window. Use this (not calculate_anomaly) before threshold-based event
+    detection — values are unitless and comparable across regions and seasons.
+
+    Args:
+        dataset_id: ID of the dataset
+        baseline_start: Start date of baseline period (YYYY-MM-DD)
+        baseline_end: End date of baseline period (YYYY-MM-DD)
+        period: Grouping for climatology — "dayofyear" (default), "month", or "season"
+
+    Returns:
+        New dataset_id containing standardized anomaly (z-score) values
+    """
+    _ensure_materialized_local(dataset_id)
+    try:
+        baseline_start, baseline_end = validate_date_range(baseline_start, baseline_end)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    if period not in ("dayofyear", "month", "season"):
+        return {"error": f"Invalid period '{period}'. Use: dayofyear, month, season"}
+
+    try:
+        ds = session_manager.get(dataset_id)
+        metadata = session_manager.get_metadata(dataset_id)
+    except KeyError as e:
+        return {"error": str(e)}
+
+    try:
+        baseline = ds.sel(time=slice(baseline_start, baseline_end))
+        group_key = f"time.{period}"
+        clim_mean = baseline.groupby(group_key).mean()
+        clim_std = baseline.groupby(group_key).std()
+        # Avoid division-by-zero where std is 0 (e.g., constant fields)
+        clim_std = clim_std.where(clim_std > 0)
+        anomaly = (ds.groupby(group_key) - clim_mean).groupby(group_key) / clim_std
+    except Exception as e:
+        return {"error": f"Failed to calculate standardized anomaly: {str(e)}"}
+
+    new_id = session_manager.store(
+        data=anomaly,
+        source=metadata.source,
+        variable=f"{metadata.variable}_zscore",
+        model=metadata.model,
+        scenario=metadata.scenario,
+        description=(
+            f"Standardized anomaly (z-score, by {period}) of {dataset_id} "
+            f"vs baseline {baseline_start}–{baseline_end}"
+        ),
+    )
+
+    return {
+        "success": True,
+        "dataset_id": new_id,
+        "original_dataset_id": dataset_id,
+        "baseline_period": {"start": baseline_start, "end": baseline_end},
+        "grouping": period,
+        "units": "sigma (standard deviations from baseline mean)",
+    }
+
+
+def _ensure_materialized_local(dataset_id: str):
+    """Local wrapper to avoid circular import at module load."""
+    from rcmes_mcp.tools.data_access import _materialization_events
+    event = _materialization_events.get(dataset_id)
+    if event is None:
+        return
+    while not event.wait(timeout=3.0):
+        pass

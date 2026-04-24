@@ -949,6 +949,182 @@ def _get_chat_tools() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "calculate_standardized_anomaly",
+                "description": "Compute z-score anomalies vs a baseline climatology (per day-of-year/month/season). Run BEFORE detect_extreme_events.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string"},
+                        "baseline_start": {"type": "string", "description": "YYYY-MM-DD"},
+                        "baseline_end": {"type": "string", "description": "YYYY-MM-DD"},
+                        "period": {"type": "string", "enum": ["dayofyear", "month", "season"], "default": "dayofyear"},
+                    },
+                    "required": ["dataset_id", "baseline_start", "baseline_end"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "detect_extreme_events",
+                "description": "Detect spatiotemporal extreme events from a STANDARDIZED ANOMALY field via 3D connected-component labeling. Returns event catalogue.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string", "description": "Z-score dataset (from calculate_standardized_anomaly)"},
+                        "sigma_threshold": {"type": "number", "default": 2.0},
+                        "min_duration_days": {"type": "integer", "default": 1},
+                        "min_area_cells": {"type": "integer", "default": 1},
+                        "direction": {"type": "string", "enum": ["positive", "negative", "both"], "default": "both"},
+                        "max_events": {"type": "integer", "default": 50},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate_eof",
+                "description": "EOF/PCA decomposition of a (time, lat, lon) field. Returns N leading spatial modes and PC time series. Best applied to anomalies on a coarsened/regional field.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string"},
+                        "n_modes": {"type": "integer", "default": 3, "description": "Number of leading modes (max 10)"},
+                        "detrend": {"type": "boolean", "default": True},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_hovmoller",
+                "description": "Hovmöller diagram (time × lat or time × lon) — average over the other spatial dim. Anomaly-friendly default colormap.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string"},
+                        "average_over": {"type": "string", "enum": ["lat", "lon"], "default": "lon"},
+                        "title": {"type": "string"},
+                        "colormap": {"type": "string", "default": "RdBu_r"},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "load_multi_model_ensemble",
+                "description": "Load the same variable/scenario/region across multiple CMIP6 models (max 10) into one ensemble dataset with a 'model' dimension.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "variable": {"type": "string"},
+                        "models": {"type": "array", "items": {"type": "string"}, "description": "List of CMIP6 model names"},
+                        "scenario": {"type": "string"},
+                        "start_date": {"type": "string"},
+                        "end_date": {"type": "string"},
+                        "lat_min": {"type": "number"}, "lat_max": {"type": "number"},
+                        "lon_min": {"type": "number"}, "lon_max": {"type": "number"},
+                    },
+                    "required": ["variable", "models", "scenario", "start_date", "end_date", "lat_min", "lat_max", "lon_min", "lon_max"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate_ensemble_statistics",
+                "description": "Reduce a multi-model ensemble across the 'model' dim. Returns dataset_ids for mean/std/min/max plus an optional model-agreement map (IPCC stippling) when a baseline window is provided.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ensemble_dataset_id": {"type": "string"},
+                        "baseline_start": {"type": "string", "description": "YYYY-MM-DD (optional, enables agreement map)"},
+                        "baseline_end": {"type": "string"},
+                    },
+                    "required": ["ensemble_dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "compare_scenarios",
+                "description": "Load same variable/model across multiple SSP scenarios (max 5). Returns per-scenario dataset_ids and pairwise time-mean differences. Pair with generate_scenario_fan_chart.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "variable": {"type": "string"},
+                        "model": {"type": "string"},
+                        "scenarios": {"type": "array", "items": {"type": "string"}, "description": "e.g. ['ssp126','ssp245','ssp585']"},
+                        "start_date": {"type": "string"},
+                        "end_date": {"type": "string"},
+                        "lat_min": {"type": "number"}, "lat_max": {"type": "number"},
+                        "lon_min": {"type": "number"}, "lon_max": {"type": "number"},
+                    },
+                    "required": ["variable", "model", "scenarios", "start_date", "end_date", "lat_min", "lat_max", "lon_min", "lon_max"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate_time_of_emergence",
+                "description": "Map the year at which the climate-change signal exceeds N×σ of natural variability per grid cell. Returns 2D (lat, lon) of emergence year (NaN if never).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string"},
+                        "baseline_start": {"type": "string"},
+                        "baseline_end": {"type": "string"},
+                        "rolling_years": {"type": "integer", "default": 20},
+                        "sigma_threshold": {"type": "number", "default": 1.0},
+                    },
+                    "required": ["dataset_id", "baseline_start", "baseline_end"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_scenario_fan_chart",
+                "description": "Compare scenarios as time series. Pass a {scenario_label: dataset_id} mapping. If inputs have a 'model' dim, draws a 5-95% shaded band per scenario.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "scenario_dataset_ids": {"type": "object", "description": "Mapping {scenario_label: dataset_id}"},
+                        "title": {"type": "string"},
+                        "smooth_window": {"type": "integer", "default": 0},
+                    },
+                    "required": ["scenario_dataset_ids"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_ensemble_spread_plot",
+                "description": "Plot ensemble spread over time: median + 25-75% and 5-95% shaded bands across models. Optionally overlay individual models.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ensemble_dataset_id": {"type": "string"},
+                        "title": {"type": "string"},
+                        "show_individual": {"type": "boolean", "default": False},
+                        "smooth_window": {"type": "integer", "default": 0},
+                    },
+                    "required": ["ensemble_dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "prepare_download",
                 "description": (
                     "Prepare a dataset for download and return a temporary download link. "
@@ -1003,6 +1179,18 @@ _CHAT_TOOL_IMPLS: dict[str, Any] = {
     "calculate_batch_etccdi": indices.calculate_batch_etccdi,
     "generate_country_map": visualization.generate_country_map,
     "calculate_correlation": analysis.calculate_correlation,
+    # Pillar 1 — spatiotemporal anomaly detection
+    "calculate_standardized_anomaly": processing.calculate_standardized_anomaly,
+    "detect_extreme_events": analysis.detect_extreme_events,
+    "calculate_eof": analysis.calculate_eof,
+    "generate_hovmoller": visualization.generate_hovmoller,
+    # Pillar 2 — ensemble & scenario comparison
+    "load_multi_model_ensemble": analysis.load_multi_model_ensemble,
+    "calculate_ensemble_statistics": analysis.calculate_ensemble_statistics,
+    "compare_scenarios": analysis.compare_scenarios,
+    "calculate_time_of_emergence": analysis.calculate_time_of_emergence,
+    "generate_scenario_fan_chart": visualization.generate_scenario_fan_chart,
+    "generate_ensemble_spread_plot": visualization.generate_ensemble_spread_plot,
     "execute_python_code": code_execution.execute_python_code,
     "prepare_download": None,  # Handled inline below
 }
@@ -1150,11 +1338,32 @@ def _build_system_prompt() -> str:
         "**Resolution**: 0.25 degree (~25km)\n\n"
 
         "## Capabilities\n"
-        "- **Data loading**: load_climate_data\n"
-        "- **Processing**: spatial_subset, temporal_subset, regrid, convert_units, mask_by_country\n"
+        "- **Data loading**: load_climate_data, load_multi_model_ensemble\n"
+        "- **Processing**: spatial_subset, temporal_subset, regrid, convert_units, mask_by_country, "
+        "calculate_anomaly, calculate_standardized_anomaly\n"
         "- **Analysis**: calculate_statistics, calculate_trend, calculate_climatology, "
-        "calculate_regional_mean, analyze_heatwaves, calculate_batch_etccdi, calculate_correlation\n"
-        "- **Visualization**: generate_map, generate_timeseries_plot, generate_histogram, generate_country_map\n\n"
+        "calculate_regional_mean, analyze_heatwaves, calculate_batch_etccdi, calculate_correlation, "
+        "calculate_eof, detect_extreme_events, calculate_ensemble_statistics, compare_scenarios, "
+        "calculate_time_of_emergence\n"
+        "- **Visualization**: generate_map, generate_timeseries_plot, generate_histogram, "
+        "generate_country_map, generate_hovmoller, generate_scenario_fan_chart, generate_ensemble_spread_plot\n\n"
+
+        "## Advanced workflow recipes (chain these for richer analyses)\n"
+        "**Spatiotemporal anomaly detection** (find extreme heat/cold/wet/dry events):\n"
+        "  load_climate_data -> calculate_standardized_anomaly(baseline=historical period) "
+        "-> detect_extreme_events(sigma_threshold=2.0) -> generate_hovmoller (visualize)\n\n"
+        "**Dominant variability patterns** (EOF/PCA):\n"
+        "  load_climate_data -> calculate_anomaly -> calculate_eof(n_modes=3) "
+        "-> generate_map(spatial_dataset_id) AND generate_timeseries_plot([pc_dataset_id])\n\n"
+        "**Multi-model ensemble** (IPCC-style with model agreement):\n"
+        "  load_multi_model_ensemble(models=[5 picks]) -> calculate_ensemble_statistics(baseline_start, baseline_end) "
+        "-> generate_map(agreement_id, colormap='RdBu_r') AND generate_ensemble_spread_plot(ensemble_dataset_id)\n\n"
+        "**Scenario comparison** (low vs high emissions):\n"
+        "  compare_scenarios(scenarios=['ssp126','ssp245','ssp585']) "
+        "-> generate_scenario_fan_chart(per_scenario mapping) AND generate_map(differences[i].dataset_id)\n\n"
+        "**Time-of-emergence** (when does a cell experience climate change?):\n"
+        "  load_climate_data(2015-2100, ssp585) -> calculate_time_of_emergence(baseline_start='1950-01-01', "
+        "baseline_end='2014-12-31') -> generate_map(emergence_year, colormap='viridis')\n\n"
 
         "## Python Code Execution\n"
         "You can write and execute Python code using `execute_python_code` for custom analyses "

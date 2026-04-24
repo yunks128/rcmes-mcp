@@ -912,3 +912,325 @@ def generate_histogram(
 
     except Exception as e:
         return {"error": f"Failed to generate histogram: {str(e)}"}
+
+
+@mcp.tool()
+def generate_hovmoller(
+    dataset_id: str,
+    average_over: str = "lon",
+    title: str | None = None,
+    colormap: str = "RdBu_r",
+    vmin: float | None = None,
+    vmax: float | None = None,
+) -> dict:
+    """
+    Generate a Hovmöller diagram (time × latitude or time × longitude).
+
+    Useful for visualizing propagating anomalies, monsoon onsets, or any
+    pattern that shifts spatially over time. Average is taken across the
+    OTHER spatial dimension before plotting.
+
+    Args:
+        dataset_id: Dataset with (time, lat, lon) dimensions
+        average_over: "lon" → time vs lat (zonal mean) or "lat" → time vs lon (meridional mean)
+        title: Plot title
+        colormap: Colormap name (default RdBu_r — good for anomalies)
+        vmin, vmax: Color scale limits; if None, symmetric around zero
+
+    Returns:
+        base64 PNG and file path
+    """
+    _ensure_materialized(dataset_id)
+    if average_over not in ("lat", "lon"):
+        return {"error": "average_over must be 'lat' or 'lon'"}
+
+    try:
+        ds = session_manager.get(dataset_id)
+        metadata = session_manager.get_metadata(dataset_id)
+    except KeyError as e:
+        return {"error": str(e)}
+
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+
+        if isinstance(ds, xr.DataArray):
+            data = ds
+        else:
+            var_name = metadata.variable if (metadata.variable and metadata.variable in ds.data_vars) else list(ds.data_vars)[0]
+            data = ds[var_name]
+        if not all(d in data.dims for d in ("time", "lat", "lon")):
+            return {"error": "Hovmöller requires (time, lat, lon) dimensions"}
+
+        _progress(1, 3, f"Computing zonal/meridional mean over {average_over}...")
+        reduced = data.mean(dim=average_over).compute()
+        keep_dim = "lat" if average_over == "lon" else "lon"
+        reduced = reduced.transpose("time", keep_dim)
+
+        # Symmetric scale if vmin/vmax not given (anomaly-friendly default)
+        values = reduced.values
+        if vmin is None and vmax is None:
+            absmax = float(np.nanpercentile(np.abs(values), 98))
+            vmin, vmax = -absmax, absmax
+
+        _progress(2, 3, "Rendering Hovmöller...")
+        fig, ax = plt.subplots(figsize=(10, 7))
+        times = reduced.time.values
+        coord = reduced[keep_dim].values
+        # time on Y, spatial coord on X (standard orientation)
+        im = ax.pcolormesh(coord, times, values, cmap=colormap, vmin=vmin, vmax=vmax, shading="auto")
+        ax.set_xlabel(f"{keep_dim.capitalize()}")
+        ax.set_ylabel("Time")
+        try:
+            ax.yaxis.set_major_locator(mdates.AutoDateLocator())
+            ax.yaxis.set_major_formatter(mdates.ConciseDateFormatter(ax.yaxis.get_major_locator()))
+        except Exception:
+            pass
+        cbar = plt.colorbar(im, ax=ax, pad=0.02)
+        cbar.set_label(data.attrs.get("units", metadata.variable or ""))
+        if title:
+            ax.set_title(title)
+        else:
+            ax.set_title(f"Hovmöller — {metadata.variable} (mean over {average_over})")
+
+        _progress(3, 3, "Encoding...")
+        filename = f"hovmoller_{dataset_id}.png"
+        filepath = _save_fig(fig, filename)
+        img_base64 = _fig_to_base64(fig)
+        plt.close(fig)
+
+        return {
+            "success": True,
+            "image_base64": img_base64,
+            "file_path": filepath,
+            "dataset_id": dataset_id,
+            "averaged_over": average_over,
+            "kept_dim": keep_dim,
+        }
+
+    except Exception as e:
+        logger.exception("generate_hovmoller failed", extra={"tool": "generate_hovmoller"})
+        return {"error": f"Failed to generate Hovmöller: {str(e)}"}
+
+
+def _spatial_mean_with_weights(arr: xr.DataArray) -> xr.DataArray:
+    """Cosine-latitude-weighted spatial mean → 1D series along time (or time+model)."""
+    if "lat" in arr.dims and "lon" in arr.dims:
+        weights = np.cos(np.deg2rad(arr.lat))
+        weights = weights.where(weights > 0, 0)
+        weighted = arr.weighted(weights)
+        return weighted.mean(dim=[d for d in ("lat", "lon") if d in arr.dims])
+    return arr
+
+
+@mcp.tool()
+def generate_scenario_fan_chart(
+    scenario_dataset_ids: dict,
+    title: str | None = None,
+    smooth_window: int = 0,
+) -> dict:
+    """
+    Compare scenarios as a fan chart over time.
+
+    Each input is reduced to a 1D series (cosine-weighted spatial mean if 3D,
+    median across models if there's a `model` dim) and plotted as a coloured line
+    per scenario. If a `model` dim is present, a shaded 5–95 % band per scenario
+    is also drawn. This is the standard IPCC-style projection plot.
+
+    Args:
+        scenario_dataset_ids: Mapping {scenario_label: dataset_id}, e.g.
+            {"ssp126": "ds_a1...", "ssp245": "ds_b2...", "ssp585": "ds_c3..."}
+        title: Plot title
+        smooth_window: Optional rolling-mean window (in time steps) for smoothing
+
+    Returns:
+        base64 PNG and file path
+    """
+    if not scenario_dataset_ids:
+        return {"error": "Provide at least one {scenario: dataset_id} entry"}
+
+    try:
+        import matplotlib.pyplot as plt
+
+        # Choose distinguishable colours per scenario
+        scenario_colors = {
+            "historical": "#444444",
+            "ssp126": "#1a9850",
+            "ssp245": "#fdae61",
+            "ssp370": "#d73027",
+            "ssp585": "#7f0000",
+        }
+        fallback = plt.cm.tab10.colors
+
+        fig, ax = plt.subplots(figsize=(11, 6))
+        n = len(scenario_dataset_ids)
+        _progress(0, n, "Reducing series per scenario...")
+
+        plotted = 0
+        for i, (label, ds_id) in enumerate(scenario_dataset_ids.items()):
+            _progress(i + 1, n, f"Reducing {label}...")
+            try:
+                ds = session_manager.get(ds_id)
+                metadata = session_manager.get_metadata(ds_id)
+            except KeyError:
+                continue
+            if isinstance(ds, xr.Dataset):
+                var = metadata.variable if (metadata.variable in ds.data_vars) else list(ds.data_vars)[0]
+                arr = ds[var]
+            else:
+                arr = ds
+            if "time" not in arr.dims:
+                continue
+
+            arr_reduced = _spatial_mean_with_weights(arr).compute()
+            color = scenario_colors.get(label, fallback[i % len(fallback)])
+
+            if "model" in arr_reduced.dims:
+                med = arr_reduced.median(dim="model")
+                lo = arr_reduced.quantile(0.05, dim="model")
+                hi = arr_reduced.quantile(0.95, dim="model")
+                if smooth_window > 1:
+                    med = med.rolling(time=smooth_window, center=True, min_periods=1).mean()
+                    lo = lo.rolling(time=smooth_window, center=True, min_periods=1).mean()
+                    hi = hi.rolling(time=smooth_window, center=True, min_periods=1).mean()
+                ax.fill_between(med.time.values, lo.values, hi.values, color=color, alpha=0.18)
+                ax.plot(med.time.values, med.values, color=color, label=f"{label} (median, 5–95%)", linewidth=1.6)
+            else:
+                series = arr_reduced
+                if smooth_window > 1:
+                    series = series.rolling(time=smooth_window, center=True, min_periods=1).mean()
+                ax.plot(series.time.values, series.values, color=color, label=label, linewidth=1.6)
+            plotted += 1
+
+        if plotted == 0:
+            return {"error": "No valid scenario datasets to plot"}
+
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Spatial-mean value")
+        ax.legend(loc="best", frameon=True)
+        ax.grid(True, alpha=0.3)
+        if title:
+            ax.set_title(title)
+        else:
+            ax.set_title("Scenario comparison (cosine-lat-weighted spatial mean)")
+
+        filename = f"fanchart_{abs(hash(tuple(scenario_dataset_ids.items()))) & 0xffffff:06x}.png"
+        filepath = _save_fig(fig, filename)
+        img_base64 = _fig_to_base64(fig)
+        plt.close(fig)
+
+        return {
+            "success": True,
+            "image_base64": img_base64,
+            "file_path": filepath,
+            "scenarios_plotted": list(scenario_dataset_ids.keys()),
+        }
+
+    except Exception as e:
+        logger.exception("generate_scenario_fan_chart failed", extra={"tool": "generate_scenario_fan_chart"})
+        return {"error": f"Failed to generate fan chart: {str(e)}"}
+
+
+@mcp.tool()
+def generate_ensemble_spread_plot(
+    ensemble_dataset_id: str,
+    title: str | None = None,
+    show_individual: bool = False,
+    smooth_window: int = 0,
+) -> dict:
+    """
+    Plot the spread across an ensemble's `model` dimension over time.
+
+    Reduces space first (cosine-lat weighted), then shows the median, 25–75 %
+    inner band, and 5–95 % outer band across models. Optionally overlays each
+    individual model as a thin line.
+
+    Args:
+        ensemble_dataset_id: Multi-model dataset (from load_multi_model_ensemble)
+        title: Plot title
+        show_individual: Overlay each model as a thin line (default False)
+        smooth_window: Optional rolling-mean window for smoothing
+
+    Returns:
+        base64 PNG and file path
+    """
+    _ensure_materialized(ensemble_dataset_id)
+    try:
+        ds = session_manager.get(ensemble_dataset_id)
+        metadata = session_manager.get_metadata(ensemble_dataset_id)
+    except KeyError as e:
+        return {"error": str(e)}
+
+    if "model" not in ds.dims:
+        return {"error": "Input is not an ensemble (missing 'model' dim)"}
+
+    try:
+        import matplotlib.pyplot as plt
+
+        if isinstance(ds, xr.Dataset):
+            var = metadata.variable if (metadata.variable in ds.data_vars) else list(ds.data_vars)[0]
+            arr = ds[var]
+        else:
+            arr = ds
+
+        if "time" not in arr.dims:
+            return {"error": "Ensemble has no time dimension"}
+
+        _progress(1, 3, "Spatial weighted mean...")
+        series = _spatial_mean_with_weights(arr).compute()  # (model, time)
+
+        _progress(2, 3, "Computing percentiles...")
+        med = series.median(dim="model")
+        p05 = series.quantile(0.05, dim="model")
+        p25 = series.quantile(0.25, dim="model")
+        p75 = series.quantile(0.75, dim="model")
+        p95 = series.quantile(0.95, dim="model")
+
+        if smooth_window > 1:
+            for s in (med, p05, p25, p75, p95):
+                pass  # placeholder — we operate on copies below
+            med = med.rolling(time=smooth_window, center=True, min_periods=1).mean()
+            p05 = p05.rolling(time=smooth_window, center=True, min_periods=1).mean()
+            p25 = p25.rolling(time=smooth_window, center=True, min_periods=1).mean()
+            p75 = p75.rolling(time=smooth_window, center=True, min_periods=1).mean()
+            p95 = p95.rolling(time=smooth_window, center=True, min_periods=1).mean()
+
+        _progress(3, 3, "Rendering...")
+        fig, ax = plt.subplots(figsize=(11, 6))
+        t = med.time.values
+        ax.fill_between(t, p05.values, p95.values, color="#1f77b4", alpha=0.15, label="5–95%")
+        ax.fill_between(t, p25.values, p75.values, color="#1f77b4", alpha=0.3, label="25–75%")
+        ax.plot(t, med.values, color="#1f77b4", linewidth=2, label="Median")
+
+        if show_individual:
+            for m in series.model.values:
+                vals = series.sel(model=m)
+                if smooth_window > 1:
+                    vals = vals.rolling(time=smooth_window, center=True, min_periods=1).mean()
+                ax.plot(vals.time.values, vals.values, color="grey", linewidth=0.5, alpha=0.5)
+
+        ax.set_xlabel("Time")
+        ax.set_ylabel(arr.attrs.get("units", metadata.variable or ""))
+        ax.legend(loc="best", frameon=True)
+        ax.grid(True, alpha=0.3)
+        n_models = int(series.sizes["model"])
+        if title:
+            ax.set_title(title)
+        else:
+            ax.set_title(f"Ensemble spread — {metadata.variable} ({n_models} models, {metadata.scenario or ''})")
+
+        filename = f"ensemble_{ensemble_dataset_id}.png"
+        filepath = _save_fig(fig, filename)
+        img_base64 = _fig_to_base64(fig)
+        plt.close(fig)
+
+        return {
+            "success": True,
+            "image_base64": img_base64,
+            "file_path": filepath,
+            "n_models": n_models,
+        }
+
+    except Exception as e:
+        logger.exception("generate_ensemble_spread_plot failed", extra={"tool": "generate_ensemble_spread_plot"})
+        return {"error": f"Failed to generate ensemble spread plot: {str(e)}"}

@@ -45,6 +45,7 @@ RCMES_TOOLS = {
     "convert_units": processing.convert_units,
     "regrid": processing.regrid,
     "calculate_anomaly": processing.calculate_anomaly,
+    "calculate_standardized_anomaly": processing.calculate_standardized_anomaly,
     # Analysis
     "calculate_statistics": analysis.calculate_statistics,
     "calculate_climatology": analysis.calculate_climatology,
@@ -53,6 +54,12 @@ RCMES_TOOLS = {
     "calculate_bias": analysis.calculate_bias,
     "calculate_correlation": analysis.calculate_correlation,
     "calculate_rmse": analysis.calculate_rmse,
+    "detect_extreme_events": analysis.detect_extreme_events,
+    "calculate_eof": analysis.calculate_eof,
+    "load_multi_model_ensemble": analysis.load_multi_model_ensemble,
+    "calculate_ensemble_statistics": analysis.calculate_ensemble_statistics,
+    "compare_scenarios": analysis.compare_scenarios,
+    "calculate_time_of_emergence": analysis.calculate_time_of_emergence,
     # Indices
     "list_climate_indices": indices.list_climate_indices,
     "calculate_etccdi_index": indices.calculate_etccdi_index,
@@ -65,6 +72,9 @@ RCMES_TOOLS = {
     "generate_comparison_map": visualization.generate_comparison_map,
     "generate_taylor_diagram": visualization.generate_taylor_diagram,
     "generate_histogram": visualization.generate_histogram,
+    "generate_hovmoller": visualization.generate_hovmoller,
+    "generate_scenario_fan_chart": visualization.generate_scenario_fan_chart,
+    "generate_ensemble_spread_plot": visualization.generate_ensemble_spread_plot,
 }
 
 SYSTEM_PROMPT = """You are a climate research assistant with access to NASA's NEX-GDDP-CMIP6 dataset.
@@ -332,6 +342,183 @@ def get_openai_tools() -> list[dict]:
                         "title": {"type": "string", "description": "Plot title"},
                     },
                     "required": ["dataset_id"],
+                },
+            },
+        },
+        # ---- Pillar 1: spatiotemporal anomaly detection ----
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate_standardized_anomaly",
+                "description": "Z-score anomaly vs baseline climatology. Run BEFORE detect_extreme_events.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string"},
+                        "baseline_start": {"type": "string"},
+                        "baseline_end": {"type": "string"},
+                        "period": {"type": "string", "enum": ["dayofyear", "month", "season"], "default": "dayofyear"},
+                    },
+                    "required": ["dataset_id", "baseline_start", "baseline_end"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "detect_extreme_events",
+                "description": "Detect spatiotemporal extreme events (3D connected-component labeling) from a z-score field. Returns event catalogue.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string"},
+                        "sigma_threshold": {"type": "number", "default": 2.0},
+                        "min_duration_days": {"type": "integer", "default": 1},
+                        "min_area_cells": {"type": "integer", "default": 1},
+                        "direction": {"type": "string", "enum": ["positive", "negative", "both"], "default": "both"},
+                        "max_events": {"type": "integer", "default": 50},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate_eof",
+                "description": "EOF/PCA decomposition. Returns leading spatial modes + PC time series.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string"},
+                        "n_modes": {"type": "integer", "default": 3},
+                        "detrend": {"type": "boolean", "default": True},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_hovmoller",
+                "description": "Hovmöller diagram (time × lat or lon).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string"},
+                        "average_over": {"type": "string", "enum": ["lat", "lon"], "default": "lon"},
+                        "title": {"type": "string"},
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        # ---- Pillar 2: ensemble & scenario comparison ----
+        {
+            "type": "function",
+            "function": {
+                "name": "load_multi_model_ensemble",
+                "description": "Load a variable across multiple CMIP6 models (max 10) into one dataset with a 'model' dim.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "variable": {"type": "string"},
+                        "models": {"type": "array", "items": {"type": "string"}},
+                        "scenario": {"type": "string"},
+                        "start_date": {"type": "string"},
+                        "end_date": {"type": "string"},
+                        "lat_min": {"type": "number"}, "lat_max": {"type": "number"},
+                        "lon_min": {"type": "number"}, "lon_max": {"type": "number"},
+                    },
+                    "required": ["variable", "models", "scenario", "start_date", "end_date", "lat_min", "lat_max", "lon_min", "lon_max"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate_ensemble_statistics",
+                "description": "Reduce ensemble across 'model' dim. Returns mean/std/min/max ids and (with baseline) IPCC-style agreement map.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ensemble_dataset_id": {"type": "string"},
+                        "baseline_start": {"type": "string"},
+                        "baseline_end": {"type": "string"},
+                    },
+                    "required": ["ensemble_dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "compare_scenarios",
+                "description": "Load same variable/model across multiple SSP scenarios. Returns per-scenario ids + pairwise differences.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "variable": {"type": "string"},
+                        "model": {"type": "string"},
+                        "scenarios": {"type": "array", "items": {"type": "string"}},
+                        "start_date": {"type": "string"},
+                        "end_date": {"type": "string"},
+                        "lat_min": {"type": "number"}, "lat_max": {"type": "number"},
+                        "lon_min": {"type": "number"}, "lon_max": {"type": "number"},
+                    },
+                    "required": ["variable", "model", "scenarios", "start_date", "end_date", "lat_min", "lat_max", "lon_min", "lon_max"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate_time_of_emergence",
+                "description": "Per-grid-cell year when |signal| > N×σ of natural variability emerges from baseline.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string"},
+                        "baseline_start": {"type": "string"},
+                        "baseline_end": {"type": "string"},
+                        "rolling_years": {"type": "integer", "default": 20},
+                        "sigma_threshold": {"type": "number", "default": 1.0},
+                    },
+                    "required": ["dataset_id", "baseline_start", "baseline_end"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_scenario_fan_chart",
+                "description": "Compare scenarios as time series. Pass {scenario_label: dataset_id}.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "scenario_dataset_ids": {"type": "object"},
+                        "title": {"type": "string"},
+                        "smooth_window": {"type": "integer", "default": 0},
+                    },
+                    "required": ["scenario_dataset_ids"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_ensemble_spread_plot",
+                "description": "Median + percentile bands across models over time.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ensemble_dataset_id": {"type": "string"},
+                        "title": {"type": "string"},
+                        "show_individual": {"type": "boolean", "default": False},
+                        "smooth_window": {"type": "integer", "default": 0},
+                    },
+                    "required": ["ensemble_dataset_id"],
                 },
             },
         },
