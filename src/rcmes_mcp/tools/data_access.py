@@ -10,13 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import threading
 import time
-from datetime import timedelta
-from pathlib import Path
 
-import numpy as np
 import xarray as xr
 
 logger = logging.getLogger("rcmes.tools.data_access")
@@ -554,21 +550,21 @@ def load_climate_data(
     except PermissionError as e:
         logger.error(f"S3 access error: {e}", extra={"tool": "load_climate_data", "error": str(e)})
         return {
-            "error": f"S3 access denied — this usually means the data server is unreachable from this network. "
-                     f"Try using pre-downloaded local data (RCMES_LOCAL_DATA_DIR) or run 'rcmes-warmup' from a machine with S3 access.",
+            "error": "S3 access denied — this usually means the data server is unreachable from this network. "
+                     "Try using pre-downloaded local data (RCMES_LOCAL_DATA_DIR) or run 'rcmes-warmup' from a machine with S3 access.",
         }
     except Exception as e:
         err_str = str(e)
         # Provide helpful context for common network errors
         if "Access Denied" in err_str or "PermissionError" in err_str:
             err_str = (
-                f"S3 access denied — the data server may be unreachable from this network. "
-                f"Try using pre-downloaded local data (RCMES_LOCAL_DATA_DIR) or run 'rcmes-warmup' from a machine with S3 access."
+                "S3 access denied — the data server may be unreachable from this network. "
+                "Try using pre-downloaded local data (RCMES_LOCAL_DATA_DIR) or run 'rcmes-warmup' from a machine with S3 access."
             )
         elif "timed out" in err_str.lower() or "timeout" in err_str.lower():
             err_str = (
-                f"Connection to S3 timed out — the data server may be unreachable from this network. "
-                f"Try using pre-downloaded local data (RCMES_LOCAL_DATA_DIR)."
+                "Connection to S3 timed out — the data server may be unreachable from this network. "
+                "Try using pre-downloaded local data (RCMES_LOCAL_DATA_DIR)."
             )
         logger.exception(f"Failed to load data: {e}", extra={"tool": "load_climate_data", "error": str(e)})
         return {"error": f"Failed to load data: {err_str}"}

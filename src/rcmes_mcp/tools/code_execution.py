@@ -7,16 +7,17 @@ The executed code has access to scientific libraries and loaded datasets.
 
 from __future__ import annotations
 
-import io
 import contextlib
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import io
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
 import matplotlib
+
 matplotlib.use("Agg")  # Non-interactive backend
 
 from rcmes_mcp.utils.session import session_manager
-
 
 # Modules the executed code is allowed to import
 _ALLOWED_MODULES = frozenset({
@@ -118,8 +119,8 @@ def _store_dataset(data, description: str = "custom analysis result", variable: 
 
 def _get_downloads_dir():
     """Get the downloads directory, creating if needed."""
-    from pathlib import Path
     import os
+    from pathlib import Path
     downloads_dir = Path(os.environ.get("RCMES_DOWNLOADS_DIR", Path.home() / ".rcmes" / "downloads"))
     downloads_dir.mkdir(parents=True, exist_ok=True)
     return downloads_dir
@@ -135,8 +136,9 @@ def _save_to_netcdf(data, filepath: str | None = None):
     Returns:
         Download URL string
     """
-    import xarray as xr
     from pathlib import Path
+
+    import xarray as xr
     if hasattr(data, 'compute'):
         data = data.compute()
     if isinstance(data, xr.DataArray):
@@ -214,10 +216,10 @@ def execute_python_code(code: str) -> dict:
     Returns:
         Dictionary with stdout, stderr, images, and any errors
     """
-    import numpy as np
-    import xarray as xr
-    import pandas as pd
     import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    import xarray as xr
 
     # Build the execution namespace
     namespace: dict[str, Any] = {

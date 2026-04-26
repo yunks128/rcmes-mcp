@@ -12,7 +12,6 @@ import hashlib
 import io
 import json
 import logging
-import tempfile
 import time
 from pathlib import Path
 
@@ -22,10 +21,10 @@ import xarray as xr
 logger = logging.getLogger("rcmes.tools.visualization")
 
 from rcmes_mcp.server import mcp
-from rcmes_mcp.utils.session import session_manager
 
 # Re-use thread-local for progress callbacks
 from rcmes_mcp.tools.data_access import _thread_local
+from rcmes_mcp.utils.session import session_manager
 
 
 def _progress(step: int, total: int, detail: str):
@@ -47,6 +46,7 @@ def _ensure_materialized(dataset_id: str):
 
 # PNG cache directory — use RCMES_CACHE_DIR (writable) instead of /tmp
 import os as _os
+
 _PLOT_CACHE_DIR = Path(_os.environ.get(
     "RCMES_CACHE_DIR",
     Path.home() / ".rcmes" / "cache",
@@ -427,7 +427,7 @@ def generate_timeseries_plot(
         return result
 
     except Exception as e:
-        logger.exception(f"generate_timeseries_plot failed", extra={"tool": "generate_timeseries_plot", "error": str(e)})
+        logger.exception("generate_timeseries_plot failed", extra={"tool": "generate_timeseries_plot", "error": str(e)})
         return {"error": f"Failed to generate time series plot: {str(e)}"}
 
 
@@ -951,8 +951,8 @@ def generate_hovmoller(
         return {"error": str(e)}
 
     try:
-        import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
+        import matplotlib.pyplot as plt
 
         if isinstance(ds, xr.DataArray):
             data = ds

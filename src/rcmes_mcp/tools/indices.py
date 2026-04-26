@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 
-import numpy as np
 import xarray as xr
 
 from rcmes_mcp.server import mcp
@@ -181,8 +180,8 @@ def calculate_etccdi_index(
 
     # Check if xclim is available
     try:
-        import xclim
-        from xclim import indices
+        import xclim  # noqa: F401  - availability check
+        from xclim import indices  # noqa: F401  - availability check
     except ImportError:
         return {"error": "xclim package not installed. Install with: pip install xclim"}
 

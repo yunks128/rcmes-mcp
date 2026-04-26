@@ -18,15 +18,9 @@ import argparse
 import logging
 import sys
 import time
-from pathlib import Path
-
-import xarray as xr
 
 from rcmes_mcp.utils.cloud import (
     CMIP6_MODELS,
-    CMIP6_SCENARIOS,
-    CMIP6_VARIABLES,
-    DEFAULT_CHUNKS,
     _get_cached_kerchunk_ref,
     open_nex_gddp_dataset,
 )
@@ -136,7 +130,7 @@ def warmup_kerchunk_refs(
 
 def _download_one(combo, year_ranges, dry_run=False):
     """Download and cache a single subset. Returns (label, status, elapsed)."""
-    from rcmes_mcp.tools.data_access import _cache_subset, _get_subset_cache_key, _get_cached_subset
+    from rcmes_mcp.tools.data_access import _cache_subset, _get_cached_subset, _get_subset_cache_key
 
     region_key, region, model, scenario, variable, (start_yr, end_yr) = combo
     label = f"{variable}/{model}/{scenario} @ {region['name']} ({start_yr}-{end_yr})"

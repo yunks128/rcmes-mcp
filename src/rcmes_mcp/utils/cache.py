@@ -11,11 +11,12 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import xarray as xr
 

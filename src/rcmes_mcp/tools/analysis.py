@@ -8,8 +8,6 @@ and model evaluation metrics.
 from __future__ import annotations
 
 import logging
-import threading
-import time
 
 import numpy as np
 import xarray as xr
@@ -255,18 +253,14 @@ def calculate_trend(
             if median_step_days > 300:
                 # Annual data: each step ~1 year, 10 steps per decade
                 steps_per_decade = 10
-                freq_label = "annual"
             elif median_step_days > 25:
                 # Monthly data: each step ~1 month, 120 steps per decade
                 steps_per_decade = 120
-                freq_label = "monthly"
             else:
                 # Daily data: each step ~1 day, 3652.5 steps per decade
                 steps_per_decade = 3652.5
-                freq_label = "daily"
         else:
             steps_per_decade = 3652.5
-            freq_label = "daily"
 
         # Convert slope to per-decade
         slope_per_decade = slope * steps_per_decade
@@ -699,7 +693,7 @@ def detect_extreme_events(
                     continue
                 # max footprint across time slices
                 footprint = max(
-                    int(((labels[t] == ev_id).sum())) for t in np.unique(t_idx)
+                    int((labels[t] == ev_id).sum()) for t in np.unique(t_idx)
                 )
                 if footprint < min_area_cells:
                     continue
@@ -785,7 +779,6 @@ def calculate_eof(
 
         if detrend:
             _progress(2, 5, "Detrending per grid cell...")
-            t_idx = np.arange(data.sizes["time"])
             # Linear detrend along time axis
             from scipy import signal
             arr = data.values.astype(np.float64)
@@ -941,7 +934,6 @@ def load_multi_model_ensemble(
         from rcmes_mcp.tools.data_access import wait_for_materialization
         wait_for_materialization(ds_id, timeout=600)
         ds = session_manager.get(ds_id)
-        meta = session_manager.get_metadata(ds_id)
         if isinstance(ds, xr.Dataset):
             var_name = variable if variable in ds.data_vars else list(ds.data_vars)[0]
             arr = ds[var_name]
@@ -1296,11 +1288,6 @@ def _to_monthly_series(da: xr.DataArray) -> xr.DataArray:
     """Reduce to a 1-D-in-time series per model: spatial mean + monthly resample."""
     s = _spatial_mean(da)
     if "time" in s.dims and getattr(s.time, "dt", None) is not None:
-        # Resample only if higher than monthly cadence
-        try:
-            inferred = xr.infer_freq(s.time[:50]) if s.sizes["time"] > 5 else None
-        except Exception:
-            inferred = None
         # Always resample to month-start to align ensemble + reference time bases
         s = s.resample(time="MS").mean()
     return s.compute()
@@ -1625,10 +1612,7 @@ def validate_ensemble_weighting(
         ens_test_aligned = ens_test.sel(time=common_test).values  # (model, time)
         weighted_test = (w[:, None] * ens_test_aligned).sum(axis=0)
 
-        # Train-window RMSE for context
-        ens_train_aligned = ens_train.values
-        ref_train_v = ref_train.values
-        # Align time axes
+        # Train-window RMSE for context — align time axes first
         common_train = np.intersect1d(ens_train.time.values, ref_train.time.values)
         ens_tr = ens_train.sel(time=common_train).values
         ref_tr = ref_train.sel(time=common_train).values

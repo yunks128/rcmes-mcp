@@ -26,16 +26,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import io
+
+import xarray as xr
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
-import io
-import xarray as xr
 
-from rcmes_mcp.utils.session import session_manager
 from rcmes_mcp.utils.logging_config import configure_logging
+from rcmes_mcp.utils.session import session_manager
 
 # Initialize logging before anything else
 configure_logging()
@@ -1350,7 +1351,7 @@ _CHAT_TOOL_IMPLS["prepare_download"] = _prepare_download
 
 def _build_system_prompt() -> str:
     """Build the system prompt with actual available models, variables, scenarios."""
-    from rcmes_mcp.utils.cloud import CMIP6_MODELS, CMIP6_VARIABLES, CMIP6_SCENARIOS
+    from rcmes_mcp.utils.cloud import CMIP6_MODELS, CMIP6_SCENARIOS, CMIP6_VARIABLES
 
     models_str = ", ".join(CMIP6_MODELS[:15])
     vars_str = ", ".join(f"{k} ({v['long_name']})" for k, v in CMIP6_VARIABLES.items())
@@ -1612,7 +1613,7 @@ async def _stream_chat(messages: list[dict], dataset_id: str | None):
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
-                finish_reason = chunk.choices[0].finish_reason
+                finish_reason = chunk.choices[0].finish_reason  # noqa: F841 - reserved for future use
 
                 # Stream text content
                 if delta.content:

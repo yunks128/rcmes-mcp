@@ -15,7 +15,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-import fsspec
 import s3fs
 import xarray as xr
 

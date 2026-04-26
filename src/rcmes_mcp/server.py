@@ -38,13 +38,10 @@ mcp = FastMCP(
 )
 
 # Import and register tools from submodules
-from rcmes_mcp.tools import data_access, processing, analysis, indices, visualization
 
 # Import and register resources
-from rcmes_mcp.resources import datasets
 
 # Import and register prompts
-from rcmes_mcp.prompts import workflows
 
 
 def main():

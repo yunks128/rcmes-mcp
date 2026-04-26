@@ -8,7 +8,6 @@ subsetting, regridding, unit conversions, and country masking.
 from __future__ import annotations
 
 import logging
-import time
 from pathlib import Path
 
 import numpy as np
@@ -590,9 +589,9 @@ def mask_by_country(
         return {"error": str(e)}
 
     try:
-        import geopandas as gpd
+        import geopandas as gpd  # noqa: F401  - availability check
         import shapely
-        from shapely.geometry import MultiPolygon, Polygon
+        from shapely.geometry import MultiPolygon, Polygon  # noqa: F401  - availability check
     except ImportError:
         return {"error": "geopandas and shapely required. Install with: pip install geopandas shapely"}
 
@@ -634,7 +633,6 @@ def mask_by_country(
             lats = ds.lat.values
 
         # Normalize longitudes to match the geometry (-180 to 180)
-        lon_orig = lons.copy()
         if lons.max() > 180:
             lons = np.where(lons > 180, lons - 360, lons)
 

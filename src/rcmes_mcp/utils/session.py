@@ -7,7 +7,6 @@ and cached for the duration of the session to avoid repeated I/O.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import uuid
 from dataclasses import dataclass, field
