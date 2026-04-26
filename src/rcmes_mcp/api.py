@@ -1125,6 +1125,96 @@ def _get_chat_tools() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "load_reference_dataset",
+                "description": "Load an OBSERVATIONAL or REANALYSIS reference dataset (NCEP Reanalysis 1 or 2 monthly air.2m via OPeNDAP) for ensemble validation. Returns a dataset_id usable as reference_id in calculate_model_weights / validate_ensemble_weighting.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "source": {"type": "string", "enum": ["ncep-reanalysis-monthly", "ncep2-reanalysis-monthly"], "description": "Reference source identifier"},
+                        "start_date": {"type": "string"},
+                        "end_date": {"type": "string"},
+                        "lat_min": {"type": "number"}, "lat_max": {"type": "number"},
+                        "lon_min": {"type": "number"}, "lon_max": {"type": "number"},
+                    },
+                    "required": ["source", "start_date", "end_date", "lat_min", "lat_max", "lon_min", "lon_max"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculate_model_weights",
+                "description": "Per-model ensemble weights via equal / skill / independence / combined (Knutti 2017, Brunner & Knutti 2020). skill and combined need a reference_dataset_id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ensemble_dataset_id": {"type": "string"},
+                        "method": {"type": "string", "enum": ["equal", "skill", "independence", "combined"], "default": "combined"},
+                        "reference_dataset_id": {"type": "string", "description": "Required for skill/combined"},
+                        "train_start": {"type": "string"},
+                        "train_end": {"type": "string"},
+                        "sigma_d": {"type": "number", "default": 0.5, "description": "Skill bandwidth (K)"},
+                        "sigma_s": {"type": "number", "default": 0.5, "description": "Independence bandwidth (K)"},
+                    },
+                    "required": ["ensemble_dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "apply_ensemble_weights",
+                "description": "Collapse a multi-model ensemble's model dim using the supplied per-model weights (will be renormalized to sum 1).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ensemble_dataset_id": {"type": "string"},
+                        "weights": {"type": "array", "items": {"type": "number"}, "description": "Length must match ensemble's model dim"},
+                    },
+                    "required": ["ensemble_dataset_id", "weights"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "combine_scenarios_weighted",
+                "description": "Combine multiple SSP scenario projections into a single probability-weighted mean (e.g., {ssp126:0.1, ssp245:0.4, ssp585:0.5} for a likelihood-weighted projection). Datasets must share the same model/region/time grid.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "scenario_dataset_ids": {"type": "object", "description": "Mapping {scenario: dataset_id}"},
+                        "weights": {"type": "object", "description": "Mapping {scenario: prior_weight}; renormalized to sum 1"},
+                    },
+                    "required": ["scenario_dataset_ids", "weights"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "validate_ensemble_weighting",
+                "description": "Train weights on a historical window and score them on a held-out test window against reference observations. Returns RMSE/bias/correlation per method, plus the weighted test series for plotting.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ensemble_dataset_id": {"type": "string"},
+                        "reference_dataset_id": {"type": "string"},
+                        "train_start": {"type": "string"},
+                        "train_end": {"type": "string"},
+                        "test_start": {"type": "string"},
+                        "test_end": {"type": "string"},
+                        "methods": {"type": "array", "items": {"type": "string"}, "description": "Subset of equal/skill/independence/combined; default = all"},
+                        "sigma_d": {"type": "number", "default": 0.5},
+                        "sigma_s": {"type": "number", "default": 0.5},
+                    },
+                    "required": ["ensemble_dataset_id", "reference_dataset_id", "train_start", "train_end", "test_start", "test_end"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "prepare_download",
                 "description": (
                     "Prepare a dataset for download and return a temporary download link. "
@@ -1191,6 +1281,12 @@ _CHAT_TOOL_IMPLS: dict[str, Any] = {
     "calculate_time_of_emergence": analysis.calculate_time_of_emergence,
     "generate_scenario_fan_chart": visualization.generate_scenario_fan_chart,
     "generate_ensemble_spread_plot": visualization.generate_ensemble_spread_plot,
+    # Pillar 3 — ensemble weighting
+    "load_reference_dataset": data_access.load_reference_dataset,
+    "calculate_model_weights": analysis.calculate_model_weights,
+    "apply_ensemble_weights": analysis.apply_ensemble_weights,
+    "validate_ensemble_weighting": analysis.validate_ensemble_weighting,
+    "combine_scenarios_weighted": analysis.combine_scenarios_weighted,
     "execute_python_code": code_execution.execute_python_code,
     "prepare_download": None,  # Handled inline below
 }
@@ -1364,6 +1460,10 @@ def _build_system_prompt() -> str:
         "**Time-of-emergence** (when does a cell experience climate change?):\n"
         "  load_climate_data(2015-2100, ssp585) -> calculate_time_of_emergence(baseline_start='1950-01-01', "
         "baseline_end='2014-12-31') -> generate_map(emergence_year, colormap='viridis')\n\n"
+        "**Ensemble weighting** (which models to trust most for a region):\n"
+        "  load_multi_model_ensemble(...) -> load_reference_dataset(source='ncep-reanalysis-monthly', ...) "
+        "-> validate_ensemble_weighting(train='1980-2002', test='2003-2014') "
+        "-> calculate_model_weights(method='combined') -> apply_ensemble_weights(weights) -> generate_map(...)\n\n"
 
         "## Python Code Execution\n"
         "You can write and execute Python code using `execute_python_code` for custom analyses "

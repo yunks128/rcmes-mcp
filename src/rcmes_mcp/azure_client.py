@@ -38,6 +38,7 @@ RCMES_TOOLS = {
     "list_loaded_datasets": data_access.list_loaded_datasets,
     "get_dataset_info": data_access.get_dataset_info,
     "delete_dataset": data_access.delete_dataset,
+    "load_reference_dataset": data_access.load_reference_dataset,
     # Processing
     "temporal_subset": processing.temporal_subset,
     "spatial_subset": processing.spatial_subset,
@@ -60,6 +61,10 @@ RCMES_TOOLS = {
     "calculate_ensemble_statistics": analysis.calculate_ensemble_statistics,
     "compare_scenarios": analysis.compare_scenarios,
     "calculate_time_of_emergence": analysis.calculate_time_of_emergence,
+    "calculate_model_weights": analysis.calculate_model_weights,
+    "apply_ensemble_weights": analysis.apply_ensemble_weights,
+    "validate_ensemble_weighting": analysis.validate_ensemble_weighting,
+    "combine_scenarios_weighted": analysis.combine_scenarios_weighted,
     # Indices
     "list_climate_indices": indices.list_climate_indices,
     "calculate_etccdi_index": indices.calculate_etccdi_index,

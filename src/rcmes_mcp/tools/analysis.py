@@ -1275,3 +1275,482 @@ def calculate_time_of_emergence(
         "note": "Plot with generate_map (NaN cells never emerge in the input window).",
     }
 
+
+# ============================================================================
+# Pillar 3 — Ensemble model weighting (Knutti et al. 2017 / Brunner & Knutti 2020)
+# ============================================================================
+
+_WEIGHTING_METHODS = ("equal", "skill", "independence", "combined")
+
+
+def _spatial_mean(da: xr.DataArray) -> xr.DataArray:
+    """Cosine-latitude-weighted spatial mean → 1D series along the remaining dims."""
+    if "lat" in da.dims:
+        w = np.cos(np.deg2rad(da.lat))
+        w = w.where(w > 0, 0)
+        return da.weighted(w).mean(dim=[d for d in ("lat", "lon") if d in da.dims])
+    return da
+
+
+def _to_monthly_series(da: xr.DataArray) -> xr.DataArray:
+    """Reduce to a 1-D-in-time series per model: spatial mean + monthly resample."""
+    s = _spatial_mean(da)
+    if "time" in s.dims and getattr(s.time, "dt", None) is not None:
+        # Resample only if higher than monthly cadence
+        try:
+            inferred = xr.infer_freq(s.time[:50]) if s.sizes["time"] > 5 else None
+        except Exception:
+            inferred = None
+        # Always resample to month-start to align ensemble + reference time bases
+        s = s.resample(time="MS").mean()
+    return s.compute()
+
+
+def _align_train_window(model_series: xr.DataArray, ref_series: xr.DataArray,
+                        start: str, end: str) -> tuple[xr.DataArray, xr.DataArray]:
+    """Slice both series to the train window and align on overlapping times."""
+    m = model_series.sel(time=slice(start, end))
+    r = ref_series.sel(time=slice(start, end))
+    common = np.intersect1d(m.time.values, r.time.values)
+    if common.size == 0:
+        raise ValueError(f"No overlapping months in train window {start}..{end}")
+    return m.sel(time=common), r.sel(time=common)
+
+
+def _rmse(a: xr.DataArray, b: xr.DataArray, dim: str = "time") -> xr.DataArray:
+    return np.sqrt(((a - b) ** 2).mean(dim=dim))
+
+
+@mcp.tool()
+def calculate_model_weights(
+    ensemble_dataset_id: str,
+    method: str = "combined",
+    reference_dataset_id: str | None = None,
+    train_start: str | None = None,
+    train_end: str | None = None,
+    sigma_d: float = 0.5,
+    sigma_s: float = 0.5,
+) -> dict:
+    """
+    Compute per-model ensemble weights via one of four schemes.
+
+    Methods (Knutti et al. 2017, Brunner & Knutti 2020):
+      - "equal":        w_i = 1/N   (no reference needed)
+      - "skill":        w_i ∝ exp(-D_i² / σ_d²),  D_i = RMSE vs reference
+      - "independence": w_i ∝ 1 / (1 + Σ_{j≠i} exp(-S_ij² / σ_s²)),
+                        S_ij = inter-model RMSE
+      - "combined":     w_i ∝ skill_i × independence_i  (IPCC AR6 style)
+
+    All metrics are computed on cosine-latitude-weighted spatial means over the
+    train window (defaults to whatever window the reference covers).
+
+    Args:
+        ensemble_dataset_id: Dataset with a `model` dim (from load_multi_model_ensemble)
+        method: One of 'equal', 'skill', 'independence', 'combined'
+        reference_dataset_id: Required for skill/combined; ignored for equal/independence
+        train_start / train_end: YYYY-MM-DD for weight training (defaults to ref overlap)
+        sigma_d: Skill bandwidth (units of K). Smaller → sharper skill-based weighting
+        sigma_s: Independence bandwidth (units of K). Smaller → stronger penalty for similar models
+
+    Returns:
+        models, weights (normalized to sum 1), per-model D_i and mean S_i, method, settings
+    """
+    method = method.lower()
+    if method not in _WEIGHTING_METHODS:
+        return {"error": f"Unknown method '{method}'. Use one of {_WEIGHTING_METHODS}"}
+
+    try:
+        ds = session_manager.get(ensemble_dataset_id)
+        meta = session_manager.get_metadata(ensemble_dataset_id)
+    except KeyError as e:
+        return {"error": str(e)}
+    if "model" not in ds.dims:
+        return {"error": "Input has no 'model' dim — use load_multi_model_ensemble first."}
+
+    # Reduce ensemble to (model, time) regional-mean monthly
+    if isinstance(ds, xr.Dataset):
+        var = meta.variable if (meta.variable in ds.data_vars) else list(ds.data_vars)[0]
+        arr = ds[var]
+    else:
+        arr = ds
+    _progress(1, 4, "Reducing ensemble to monthly regional means...")
+    ens_series = _to_monthly_series(arr)  # (model, time)
+    models = [str(m) for m in ens_series.model.values]
+    n = len(models)
+
+    if method == "equal":
+        weights = np.full(n, 1.0 / n)
+        return {
+            "success": True,
+            "method": "equal",
+            "models": models,
+            "weights": [round(float(w), 4) for w in weights],
+            "n_models": n,
+        }
+
+    # All non-equal methods need either reference (skill, combined) or inter-model dists
+    ref_series = None
+    if method in ("skill", "combined"):
+        if not reference_dataset_id:
+            return {"error": f"method='{method}' requires reference_dataset_id"}
+        try:
+            rds = session_manager.get(reference_dataset_id)
+            rmeta = session_manager.get_metadata(reference_dataset_id)
+        except KeyError as e:
+            return {"error": f"reference dataset not found: {e}"}
+        rvar = rmeta.variable if (rmeta.variable in (rds.data_vars if hasattr(rds, "data_vars") else [])) else None
+        if isinstance(rds, xr.Dataset):
+            rvar = rvar or list(rds.data_vars)[0]
+            rarr = rds[rvar]
+        else:
+            rarr = rds
+        _progress(2, 4, "Reducing reference to monthly regional mean...")
+        ref_series = _to_monthly_series(rarr)
+
+    # Determine train window
+    if not (train_start and train_end):
+        if ref_series is not None:
+            train_start = str(ref_series.time.min().values)[:10]
+            train_end = str(ref_series.time.max().values)[:10]
+        else:
+            train_start = str(ens_series.time.min().values)[:10]
+            train_end = str(ens_series.time.max().values)[:10]
+
+    # Compute per-model skill (D_i) when needed
+    D = np.zeros(n)
+    if method in ("skill", "combined"):
+        _progress(3, 4, "Computing per-model RMSE vs reference...")
+        for i, m in enumerate(models):
+            mi, ri = _align_train_window(ens_series.sel(model=m), ref_series,
+                                         train_start, train_end)
+            D[i] = float(_rmse(mi, ri))
+
+    # Compute inter-model distance matrix S_ij when needed
+    S = np.zeros((n, n))
+    mean_S = np.zeros(n)
+    if method in ("independence", "combined"):
+        _progress(4, 4, "Computing inter-model distance matrix...")
+        ens_train = ens_series.sel(time=slice(train_start, train_end))
+        for i in range(n):
+            mi = ens_train.sel(model=models[i])
+            for j in range(i + 1, n):
+                mj = ens_train.sel(model=models[j])
+                common = np.intersect1d(mi.time.values, mj.time.values)
+                if common.size:
+                    s_ij = float(_rmse(mi.sel(time=common), mj.sel(time=common)))
+                else:
+                    s_ij = np.nan
+                S[i, j] = s_ij
+                S[j, i] = s_ij
+        mean_S = np.nanmean(np.where(S > 0, S, np.nan), axis=1)
+
+    # Build weights per method
+    if method == "skill":
+        w = np.exp(-(D ** 2) / (sigma_d ** 2))
+    elif method == "independence":
+        sim = np.exp(-(S ** 2) / (sigma_s ** 2))
+        np.fill_diagonal(sim, 0.0)
+        w = 1.0 / (1.0 + np.nansum(sim, axis=1))
+    else:  # combined
+        skill = np.exp(-(D ** 2) / (sigma_d ** 2))
+        sim = np.exp(-(S ** 2) / (sigma_s ** 2))
+        np.fill_diagonal(sim, 0.0)
+        indep = 1.0 / (1.0 + np.nansum(sim, axis=1))
+        w = skill * indep
+
+    if w.sum() <= 0 or not np.isfinite(w.sum()):
+        return {"error": f"Weights collapsed to zero/non-finite (D={D}, mean_S={mean_S})"}
+    w = w / w.sum()
+
+    return {
+        "success": True,
+        "method": method,
+        "models": models,
+        "weights": [round(float(x), 4) for x in w],
+        "rmse_vs_reference_K": [round(float(x), 4) for x in D] if method in ("skill", "combined") else None,
+        "mean_inter_model_rmse_K": [round(float(x), 4) for x in mean_S] if method in ("independence", "combined") else None,
+        "n_models": n,
+        "train_window": {"start": train_start, "end": train_end},
+        "sigma_d_K": sigma_d,
+        "sigma_s_K": sigma_s,
+    }
+
+
+@mcp.tool()
+def apply_ensemble_weights(
+    ensemble_dataset_id: str,
+    weights: list[float],
+) -> dict:
+    """
+    Apply per-model weights to an ensemble dataset, returning a weighted-mean
+    dataset (the model dim is collapsed). Weights are renormalized to sum 1
+    over the models present. Length must equal ensemble's model dimension.
+
+    Args:
+        ensemble_dataset_id: Dataset with a `model` dim
+        weights: List of N weights matching the model dim order
+
+    Returns:
+        dataset_id of the weighted-mean dataset (model dim removed)
+    """
+    try:
+        ds = session_manager.get(ensemble_dataset_id)
+        meta = session_manager.get_metadata(ensemble_dataset_id)
+    except KeyError as e:
+        return {"error": str(e)}
+    if "model" not in ds.dims:
+        return {"error": "Input has no 'model' dim"}
+
+    n = ds.sizes["model"]
+    w = np.array(weights, dtype=float)
+    if w.size != n:
+        return {"error": f"Length mismatch: ensemble has {n} models, got {w.size} weights"}
+    if w.sum() <= 0 or not np.isfinite(w.sum()):
+        return {"error": "Weights sum to zero or non-finite"}
+    w = w / w.sum()
+
+    if isinstance(ds, xr.Dataset):
+        var = meta.variable if (meta.variable in ds.data_vars) else list(ds.data_vars)[0]
+        arr = ds[var]
+    else:
+        arr = ds
+    w_da = xr.DataArray(w, dims=["model"], coords={"model": arr.model})
+    weighted = (arr * w_da).sum(dim="model")
+    weighted.name = f"{meta.variable}_weighted"
+
+    new_id = session_manager.store(
+        data=weighted,
+        source="computed",
+        variable=f"{meta.variable}_weighted",
+        model=meta.model,
+        scenario=meta.scenario,
+        description=f"Weighted mean of {ensemble_dataset_id}",
+    )
+    return {
+        "success": True,
+        "dataset_id": new_id,
+        "n_models": n,
+        "weights_normalized": [round(float(x), 4) for x in w],
+    }
+
+
+@mcp.tool()
+def validate_ensemble_weighting(
+    ensemble_dataset_id: str,
+    reference_dataset_id: str,
+    train_start: str,
+    train_end: str,
+    test_start: str,
+    test_end: str,
+    methods: list[str] | None = None,
+    sigma_d: float = 0.5,
+    sigma_s: float = 0.5,
+) -> dict:
+    """
+    Train each weighting scheme on a historical window and score it on a
+    held-out test window against the reference observations. Returns RMSE,
+    bias, and Pearson correlation per method, plus the weights each method
+    chose.
+
+    Args:
+        ensemble_dataset_id: Dataset with a `model` dim spanning at least both windows
+        reference_dataset_id: Reference observations covering both windows
+        train_start / train_end / test_start / test_end: YYYY-MM-DD
+        methods: Subset of ['equal','skill','independence','combined']; default = all
+        sigma_d / sigma_s: Bandwidth parameters (K) for skill/independence weighting
+
+    Returns:
+        per-method dict with weights, train RMSE, test RMSE, test bias,
+        test correlation; plus the regional-mean reference series for plotting.
+    """
+    methods = methods or list(_WEIGHTING_METHODS)
+    bad = [m for m in methods if m not in _WEIGHTING_METHODS]
+    if bad:
+        return {"error": f"Unknown methods: {bad}. Use {_WEIGHTING_METHODS}"}
+
+    try:
+        ds = session_manager.get(ensemble_dataset_id)
+        meta = session_manager.get_metadata(ensemble_dataset_id)
+        rds = session_manager.get(reference_dataset_id)
+        rmeta = session_manager.get_metadata(reference_dataset_id)
+    except KeyError as e:
+        return {"error": str(e)}
+    if "model" not in ds.dims:
+        return {"error": "Ensemble has no 'model' dim"}
+
+    if isinstance(ds, xr.Dataset):
+        var = meta.variable if (meta.variable in ds.data_vars) else list(ds.data_vars)[0]
+        arr = ds[var]
+    else:
+        arr = ds
+    if isinstance(rds, xr.Dataset):
+        rvar = rmeta.variable if (rmeta.variable in rds.data_vars) else list(rds.data_vars)[0]
+        rarr = rds[rvar]
+    else:
+        rarr = rds
+
+    _progress(1, 5, "Reducing to monthly regional means...")
+    ens_series = _to_monthly_series(arr)            # (model, time)
+    ref_series = _to_monthly_series(rarr)           # (time,)
+    models = [str(m) for m in ens_series.model.values]
+
+    # Slice train/test windows
+    ens_train = ens_series.sel(time=slice(train_start, train_end))
+    ens_test = ens_series.sel(time=slice(test_start, test_end))
+    ref_train = ref_series.sel(time=slice(train_start, train_end))
+    ref_test = ref_series.sel(time=slice(test_start, test_end))
+
+    # Align test ensemble to ref test times
+    common_test = np.intersect1d(ens_test.time.values, ref_test.time.values)
+    if common_test.size < 12:
+        return {"error": f"Test window has too few overlapping months ({common_test.size})"}
+    ref_test_aligned = ref_test.sel(time=common_test).values  # 1D
+
+    results = {}
+    for m in methods:
+        _progress(2, 5, f"Computing weights ({m})...")
+        wres = calculate_model_weights(
+            ensemble_dataset_id=ensemble_dataset_id,
+            method=m,
+            reference_dataset_id=reference_dataset_id,
+            train_start=train_start, train_end=train_end,
+            sigma_d=sigma_d, sigma_s=sigma_s,
+        )
+        if not wres.get("success"):
+            results[m] = {"error": wres.get("error")}
+            continue
+        w = np.array(wres["weights"], dtype=float)
+
+        # Apply to test-window ensemble (regional-mean series)
+        ens_test_aligned = ens_test.sel(time=common_test).values  # (model, time)
+        weighted_test = (w[:, None] * ens_test_aligned).sum(axis=0)
+
+        # Train-window RMSE for context
+        ens_train_aligned = ens_train.values
+        ref_train_v = ref_train.values
+        # Align time axes
+        common_train = np.intersect1d(ens_train.time.values, ref_train.time.values)
+        ens_tr = ens_train.sel(time=common_train).values
+        ref_tr = ref_train.sel(time=common_train).values
+        weighted_train = (w[:, None] * ens_tr).sum(axis=0)
+        train_rmse = float(np.sqrt(np.mean((weighted_train - ref_tr) ** 2)))
+
+        # Test-window scores
+        diff = weighted_test - ref_test_aligned
+        test_rmse = float(np.sqrt(np.mean(diff ** 2)))
+        test_bias = float(diff.mean())
+        # Pearson correlation on monthly anomalies (remove mean)
+        a = weighted_test - weighted_test.mean()
+        b = ref_test_aligned - ref_test_aligned.mean()
+        denom = float(np.sqrt((a ** 2).sum() * (b ** 2).sum()))
+        test_corr = float((a * b).sum() / denom) if denom > 0 else float("nan")
+
+        results[m] = {
+            "weights": [round(float(x), 4) for x in w],
+            "train_rmse_K": round(train_rmse, 4),
+            "test_rmse_K": round(test_rmse, 4),
+            "test_bias_K": round(test_bias, 4),
+            "test_correlation": round(test_corr, 4),
+            "weighted_test_series": [round(float(x), 4) for x in weighted_test],
+        }
+
+    return {
+        "success": True,
+        "models": models,
+        "train_window": {"start": train_start, "end": train_end},
+        "test_window": {"start": test_start, "end": test_end},
+        "reference_test_series": [round(float(x), 4) for x in ref_test_aligned],
+        "test_times": [str(t)[:10] for t in common_test],
+        "per_method": results,
+        "sigma_d_K": sigma_d,
+        "sigma_s_K": sigma_s,
+        "interpretation": (
+            "Lower test_rmse and higher test_correlation = better generalization. "
+            "Compare 'equal' to skill/independence/combined to judge if weighting helps."
+        ),
+    }
+
+
+@mcp.tool()
+def combine_scenarios_weighted(
+    scenario_dataset_ids: dict,
+    weights: dict,
+) -> dict:
+    """
+    Combine multiple SSP scenario projections into a single probability-weighted
+    mean projection. Use when assigning prior probabilities to each pathway, e.g.
+    {ssp126: 0.1, ssp245: 0.4, ssp370: 0.3, ssp585: 0.2} for a "current emissions
+    trajectory" prior.
+
+    All input datasets must share the same (time, lat, lon) grid (same model and
+    region). Weights are renormalized to sum 1 across the scenarios provided.
+
+    Args:
+        scenario_dataset_ids: Mapping {scenario_label: dataset_id}
+        weights: Mapping {scenario_label: prior_weight}; must cover every scenario
+                 in scenario_dataset_ids
+
+    Returns:
+        dataset_id of the weighted-mean projection, plus the normalized weights used
+    """
+    if not scenario_dataset_ids:
+        return {"error": "scenario_dataset_ids is empty"}
+    missing = [s for s in scenario_dataset_ids if s not in weights]
+    if missing:
+        return {"error": f"missing weight(s) for: {missing}"}
+
+    keys = list(scenario_dataset_ids.keys())
+    raw_w = np.array([float(weights[k]) for k in keys], dtype=float)
+    if raw_w.sum() <= 0 or not np.isfinite(raw_w.sum()):
+        return {"error": "weights sum to zero or non-finite"}
+    norm_w = raw_w / raw_w.sum()
+
+    arrays = []
+    for k in keys:
+        try:
+            ds = session_manager.get(scenario_dataset_ids[k])
+            meta = session_manager.get_metadata(scenario_dataset_ids[k])
+        except KeyError as e:
+            return {"error": f"dataset {scenario_dataset_ids[k]} not found: {e}"}
+        if isinstance(ds, xr.Dataset):
+            var = meta.variable if (meta.variable in ds.data_vars) else list(ds.data_vars)[0]
+            arr = ds[var]
+        else:
+            arr = ds
+        arrays.append(arr)
+
+    try:
+        # Manual weighted sum — xr.concat with join='outer' across scenarios that
+        # share the same model+region but differ slightly in time chunking can
+        # introduce NaNs that get silently dropped by .sum(skipna=True), producing
+        # an under-weighted mean (e.g. ~290K average becoming ~225K).
+        # Restrict to the inner-time-overlap so every scenario contributes at every step.
+        time_sets = [a.time.values for a in arrays]
+        common_time = time_sets[0]
+        for t in time_sets[1:]:
+            common_time = np.intersect1d(common_time, t)
+        if common_time.size == 0:
+            return {"error": "no overlapping time coords across scenarios"}
+        aligned = [a.sel(time=common_time) for a in arrays]
+        weighted = sum(w * a for w, a in zip(norm_w, aligned))
+    except Exception as e:
+        return {"error": f"combine failed: {str(e)}"}
+
+    # Use the first dataset's metadata as a base (variable name, model)
+    first_meta = session_manager.get_metadata(scenario_dataset_ids[keys[0]])
+    weighted.name = f"{first_meta.variable}_scenario_weighted"
+    new_id = session_manager.store(
+        data=weighted, source="computed",
+        variable=f"{first_meta.variable}_scenario_weighted",
+        model=first_meta.model,
+        scenario=",".join(keys),
+        description=f"Probability-weighted combination of {keys} with weights={norm_w.round(3).tolist()}",
+    )
+    return {
+        "success": True,
+        "dataset_id": new_id,
+        "scenarios": keys,
+        "weights_normalized": [round(float(x), 4) for x in norm_w],
+        "note": "Treats each scenario as a probabilistic future; use generate_timeseries_plot or generate_map on the result.",
+    }
+

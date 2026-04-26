@@ -656,3 +656,110 @@ def delete_dataset(dataset_id: str) -> dict:
         return {"success": True, "message": f"Dataset '{dataset_id}' deleted."}
     else:
         return {"error": f"Dataset '{dataset_id}' not found."}
+
+
+# Mapping of supported reference datasets → (OPeNDAP URL, variable name)
+_REFERENCE_SOURCES = {
+    "ncep-reanalysis-monthly": (
+        "https://psl.noaa.gov/thredds/dodsC/Datasets/ncep.reanalysis.derived/surface_gauss/air.2m.mon.mean.nc",
+        "air",
+        "K",
+    ),
+    "ncep2-reanalysis-monthly": (
+        "https://psl.noaa.gov/thredds/dodsC/Datasets/ncep.reanalysis2.derived/gaussian_grid/air.2m.mon.mean.nc",
+        "air",
+        "K",
+    ),
+}
+
+
+@mcp.tool()
+def load_reference_dataset(
+    source: str,
+    start_date: str,
+    end_date: str,
+    lat_min: float,
+    lat_max: float,
+    lon_min: float,
+    lon_max: float,
+) -> dict:
+    """
+    Load an OBSERVATIONAL or REANALYSIS reference dataset for ensemble validation.
+
+    Use the returned dataset_id as `reference_id` in calculate_model_weights and
+    validate_ensemble_weighting. Reference datasets are gridded "ground truth"
+    against which CMIP6 model skill is measured.
+
+    Currently supported sources (no auth required, OPeNDAP):
+      - "ncep-reanalysis-monthly"  : NCEP/NCAR Reanalysis 1 monthly 2-m air temp,
+                                     1948–present, ~1.875° T62 Gaussian grid
+      - "ncep2-reanalysis-monthly" : NCEP/DOE Reanalysis 2 monthly 2-m air temp,
+                                     1979–present, similar grid
+
+    The dataset is subset to the supplied bbox and time window, with longitudes
+    automatically wrapped to match NEX-GDDP-CMIP6's 0-360 convention.
+
+    Args:
+        source: One of the supported reference identifiers above.
+        start_date / end_date: YYYY-MM-DD; will be coerced to first-of-month.
+        lat_min / lat_max / lon_min / lon_max: Bounding box (lon -180..180 OK).
+
+    Returns:
+        dataset_id, source, variable, dimensions, units
+    """
+    if source not in _REFERENCE_SOURCES:
+        return {
+            "error": f"Unknown reference source '{source}'. "
+                     f"Available: {list(_REFERENCE_SOURCES.keys())}",
+        }
+    try:
+        start_date, end_date = validate_date_range(start_date, end_date)
+        validate_lat_lon_bounds(lat_min, lat_max, lon_min, lon_max)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    url, var, units = _REFERENCE_SOURCES[source]
+    # Convert lon to 0-360 to match the NCEP convention
+    lon_min_360 = lon_min if lon_min >= 0 else 360 + lon_min
+    lon_max_360 = lon_max if lon_max >= 0 else 360 + lon_max
+
+    try:
+        logger.info(f"load_reference_dataset {source} {start_date}..{end_date}",
+                    extra={"tool": "load_reference_dataset", "source": source})
+        ds = xr.open_dataset(url)
+        # NCEP lat is descending; sel by slice in either direction with sortby first
+        if float(ds.lat[0]) > float(ds.lat[-1]):
+            ds = ds.sortby("lat")
+        ds = ds.sel(time=slice(start_date, end_date),
+                    lat=slice(lat_min, lat_max))
+        if lon_min_360 < lon_max_360:
+            ds = ds.sel(lon=slice(lon_min_360, lon_max_360))
+        # Materialize so subsequent ops are fast (subset is small after bbox/time)
+        ds = ds[[var]].compute()
+    except Exception as e:
+        logger.exception("load_reference_dataset failed",
+                         extra={"tool": "load_reference_dataset", "error": str(e)})
+        return {"error": f"Failed to load reference: {str(e)}"}
+
+    # Standardize the variable name to "tas" so downstream tools find it consistently
+    if var != "tas":
+        ds = ds.rename({var: "tas"})
+
+    new_id = session_manager.store(
+        data=ds,
+        source=source,
+        variable="tas",
+        model="reference",
+        scenario="observed",
+        description=f"Reference {source} {start_date}–{end_date}",
+    )
+
+    return {
+        "success": True,
+        "dataset_id": new_id,
+        "source": source,
+        "variable": "tas",
+        "units": units,
+        "dimensions": dict(ds.sizes),
+        "note": "Use as reference_id in calculate_model_weights / validate_ensemble_weighting.",
+    }

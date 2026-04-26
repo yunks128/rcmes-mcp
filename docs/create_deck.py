@@ -460,6 +460,481 @@ def _real_change_and_agreement():
     return _save(fig, "fig_change_and_agreement.png")
 
 
+# ============================================================
+# Pillar 3 — Ensemble weighting (real data via NCEP reference)
+# ============================================================
+
+_WEIGHT_METHOD_COLORS = {
+    "equal":        "#666666",
+    "skill":        "#1a73c2",
+    "independence": "#1a9850",
+    "combined":     "#c4321c",
+}
+
+
+def _real_weighting_validation():
+    """
+    Train weights on 1980–2002 historical, validate on 2003–2014 against NCEP
+    reanalysis. Then apply the four trained weight vectors to the cached
+    SSP5-8.5 2050–2099 ensemble and compare projections.
+
+    Produces both fig_weighting_validation.png and fig_weighting_comparison.png
+    in one pass (cheaper — share the trained-weights state).
+    """
+    from rcmes_mcp.tools.data_access import load_reference_dataset
+    from rcmes_mcp.tools.analysis import (
+        validate_ensemble_weighting,
+        calculate_model_weights,
+        apply_ensemble_weights,
+    )
+
+    # 1) Load reference (NCEP regional series, very small)
+    ref_r = load_reference_dataset(
+        source="ncep-reanalysis-monthly",
+        start_date="1980-01-01", end_date="2014-12-31",
+        lat_min=32.0, lat_max=36.0, lon_min=-120.0, lon_max=-116.0,
+    )
+    if not ref_r.get("success"):
+        raise RuntimeError(f"reference load failed: {ref_r.get('error')}")
+    reference_id = ref_r["dataset_id"]
+    print(f"[deck]   reference dataset: {reference_id} dims={ref_r['dimensions']}")
+
+    # 2) Build a HISTORICAL ensemble for the same LA-basin bbox (3 models).
+    # Pre-resample to monthly + normalize calendar so xr.concat doesn't trip on
+    # CMIP6's mixed calendar conventions (noleap vs standard).
+    models = ["ACCESS-CM2", "GFDL-ESM4", "MRI-ESM2-0"]
+    series_hist = []
+    used = []
+    for m in models:
+        try:
+            data = _load("tas", m, "historical",
+                         "1980-01-01", "2014-12-31", **LA_BASIN)
+            monthly = data.resample(time="MS").mean()
+            try:
+                monthly = monthly.convert_calendar("standard", align_on="date", missing=np.nan)
+            except Exception:
+                pass
+            monthly = monthly.assign_coords(model=m).expand_dims("model")
+            series_hist.append(monthly)
+            used.append(m)
+        except Exception as e:
+            print(f"[deck]   {m} historical load failed: {e}")
+    if len(series_hist) < 2:
+        raise RuntimeError("need ≥2 historical models")
+    hist_ensemble = xr.concat(series_hist, dim="model", join="outer")
+    hist_id = session_manager.store(
+        data=hist_ensemble, source="NEX-GDDP-CMIP6", variable="tas",
+        model=",".join(used), scenario="historical",
+        description=f"Hist ensemble {used} 1980-2014 LA basin",
+    )
+
+    # 3) Validate
+    val = validate_ensemble_weighting(
+        ensemble_dataset_id=hist_id,
+        reference_dataset_id=reference_id,
+        train_start="1980-01-01", train_end="2002-12-31",
+        test_start="2003-01-01", test_end="2014-12-31",
+        sigma_d=0.5, sigma_s=0.5,
+    )
+    if not val.get("success"):
+        raise RuntimeError(f"validation failed: {val.get('error')}")
+    print(f"[deck]   validation per-method:")
+    for m, r in val["per_method"].items():
+        print(f"     {m:>13s}  weights={r.get('weights')} test_rmse={r.get('test_rmse_K')} corr={r.get('test_correlation')}")
+
+    # ---------- Figure A: validation skill bar chart -----------------------
+    methods = list(val["per_method"].keys())
+    test_rmse = [val["per_method"][m]["test_rmse_K"] for m in methods]
+    test_corr = [val["per_method"][m]["test_correlation"] for m in methods]
+    train_rmse = [val["per_method"][m]["train_rmse_K"] for m in methods]
+    colors = [_WEIGHT_METHOD_COLORS.get(m, "#888") for m in methods]
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    x = np.arange(len(methods))
+    bw = 0.35
+    axes[0].bar(x - bw / 2, train_rmse, bw, color=colors, alpha=0.55, label="train (1980–2002)")
+    axes[0].bar(x + bw / 2, test_rmse, bw, color=colors, label="test (2003–2014)")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(methods, rotation=15)
+    axes[0].set_ylabel("Regional-mean RMSE vs NCEP (K)")
+    axes[0].set_title("Skill — lower is better")
+    axes[0].grid(alpha=0.3, axis="y")
+    axes[0].legend()
+
+    axes[1].bar(x, test_corr, color=colors)
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(methods, rotation=15)
+    axes[1].set_ylabel("Pearson r (test window)")
+    axes[1].set_title("Correlation — higher is better")
+    axes[1].set_ylim(0, 1.05)
+    axes[1].grid(alpha=0.3, axis="y")
+
+    fig.suptitle(
+        f"Ensemble-weighting validation — LA basin tas, train 1980-2002 / test 2003-2014\n"
+        f"({len(used)} models, reference: NCEP Reanalysis 1)",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    _save(fig, "fig_weighting_validation.png")
+
+    # ---------- Figure B: future projections under each weighting -----------
+    # Apply each trained weight set to the cached SSP5-8.5 2050–2099 ensemble.
+    # Reuse the ensemble we built for the spread plot.
+    fut_models = used
+    fut_series = []
+    for m in fut_models:
+        data = _load("tas", m, "ssp585",
+                     "2050-01-01", "2099-12-31", **LA_BASIN)
+        # Same calendar normalization as the historical ensemble
+        monthly = data.resample(time="MS").mean()
+        try:
+            monthly = monthly.convert_calendar("standard", align_on="date", missing=np.nan)
+        except Exception:
+            pass
+        monthly = monthly.assign_coords(model=m).expand_dims("model")
+        fut_series.append(monthly)
+    fut_ensemble = xr.concat(fut_series, dim="model", join="outer")
+    fut_id = session_manager.store(
+        data=fut_ensemble, source="NEX-GDDP-CMIP6", variable="tas",
+        model=",".join(fut_models), scenario="ssp585",
+        description=f"Fut ensemble {fut_models} 2050-99 LA basin",
+    )
+
+    fig2, ax = plt.subplots(figsize=(10, 5))
+    for m in methods:
+        w = val["per_method"][m].get("weights")
+        if not w:
+            continue
+        applied = apply_ensemble_weights(ensemble_dataset_id=fut_id, weights=w)
+        if not applied.get("success"):
+            print(f"[deck]   apply {m} failed: {applied.get('error')}")
+            continue
+        wds = session_manager.get(applied["dataset_id"])
+        var = wds.name if isinstance(wds, xr.DataArray) else list(wds.data_vars)[0]
+        wda = wds if isinstance(wds, xr.DataArray) else wds[var]
+        ts = wda.mean(dim=["lat", "lon"]).resample(time="1YS").mean().compute()
+        vals = ts.values
+        if float(vals.mean()) > 200:
+            vals = vals - 273.15
+        ref0 = float(vals[0])
+        anom = vals - ref0
+        # Smooth with 5-yr rolling for readability
+        kernel = np.ones(5) / 5
+        smoothed = np.convolve(anom, kernel, mode="same")
+        color = _WEIGHT_METHOD_COLORS.get(m, "#888")
+        ax.plot(ts.time.values, anom, color=color, alpha=0.25, linewidth=0.6)
+        # Annotate effective number of weighted members (Neff = 1/Σwᵢ²) and max weight
+        n_eff = 1.0 / float(np.sum(np.array(w) ** 2))
+        wmax = max(w)
+        label = f"{m}  (N_eff={n_eff:.1f}, max w={wmax:.2f})"
+        ax.plot(ts.time.values, smoothed, color=color, linewidth=2.0, label=label)
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Δ T vs 2050 (°C)")
+    ax.set_title("Weighted SSP5-8.5 projection — LA basin tas\n"
+                 "Each colour applies a different weighting scheme to the same 3-model ensemble")
+    ax.grid(alpha=0.3)
+    ax.legend(loc="upper left", fontsize=8)
+    return _save(fig2, "fig_weighting_comparison.png")
+
+
+def _real_scenario_weighted_combine():
+    """
+    Probability-weighted scenario combining: load all 4 SSPs for ACCESS-CM2 LA basin
+    and produce 4 weighted-mean projections under different policy assumptions.
+    """
+    from rcmes_mcp.tools.analysis import combine_scenarios_weighted
+
+    scenarios = ["ssp126", "ssp245", "ssp370", "ssp585"]
+    scenario_ids = {}
+    raw_series = {}  # for plotting individual SSPs underneath
+    for sc in scenarios:
+        try:
+            data = _load("tas", "ACCESS-CM2", sc,
+                         "2050-01-01", "2099-12-31", **LA_BASIN)
+            ds_id = session_manager.store(
+                data=data, source="NEX-GDDP-CMIP6", variable="tas",
+                model="ACCESS-CM2", scenario=sc,
+                description=f"ACCESS-CM2 {sc} LA basin 2050-2099 (full 3D)",
+            )
+            scenario_ids[sc] = ds_id
+            raw_series[sc] = data.mean(dim=["lat", "lon"]).resample(time="1YS").mean().compute()
+        except Exception as e:
+            print(f"[deck]   skip {sc}: {e}")
+
+    if len(scenario_ids) < 2:
+        raise RuntimeError("need ≥2 scenarios")
+
+    # Define a few policy weight profiles
+    policy_weights = {
+        "Equal":         {"ssp126": 0.25, "ssp245": 0.25, "ssp370": 0.25, "ssp585": 0.25},
+        "Mitigation-aligned (Paris)": {"ssp126": 0.45, "ssp245": 0.35, "ssp370": 0.15, "ssp585": 0.05},
+        "Current-policies":           {"ssp126": 0.05, "ssp245": 0.30, "ssp370": 0.40, "ssp585": 0.25},
+        "High-emissions risk":        {"ssp126": 0.05, "ssp245": 0.15, "ssp370": 0.30, "ssp585": 0.50},
+    }
+    # Build weighted projections via the new tool
+    policy_series = {}
+    for label, w_full in policy_weights.items():
+        # Restrict weights to only the scenarios we successfully loaded
+        w = {sc: w_full[sc] for sc in scenario_ids if sc in w_full}
+        r = combine_scenarios_weighted(scenario_dataset_ids=scenario_ids, weights=w)
+        if not r.get("success"):
+            print(f"[deck]   combine '{label}' failed: {r.get('error')}")
+            continue
+        ws = session_manager.get(r["dataset_id"])
+        var = ws.name if isinstance(ws, xr.DataArray) else list(ws.data_vars)[0]
+        wda = ws if isinstance(ws, xr.DataArray) else ws[var]
+        policy_series[label] = wda.mean(dim=["lat", "lon"]).resample(time="1YS").mean().compute()
+        print(f"[deck]   policy '{label}' weights={r['weights_normalized']}")
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(11, 5.4))
+    ssp_colors = {"ssp126": "#1a9850", "ssp245": "#fdae61", "ssp370": "#d73027", "ssp585": "#7f0000"}
+    # individual SSPs as faint dashed lines (anomaly vs 2050)
+    ref0 = None
+    for sc, ts in raw_series.items():
+        vals = ts.values
+        if float(vals.mean()) > 200:
+            vals = vals - 273.15
+        if ref0 is None:
+            ref0 = float(vals[0])
+        ax.plot(ts.time.values, vals - ref0, color=ssp_colors.get(sc, "#888"),
+                linewidth=1.0, alpha=0.4, linestyle="--", label=f"{sc} (raw)")
+    # policy mixes as bold lines with smoothing
+    policy_colors = ["#222", "#1f77b4", "#9467bd", "#d62728"]
+    for (label, ts), color in zip(policy_series.items(), policy_colors):
+        vals = ts.values
+        if float(vals.mean()) > 200:
+            vals = vals - 273.15
+        anom = vals - ref0
+        kernel = np.ones(5) / 5
+        smoothed = np.convolve(anom, kernel, mode="same")
+        ax.plot(ts.time.values, smoothed, color=color, linewidth=2.5, label=label)
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Δ T vs 2050 (°C)")
+    ax.set_title("Probability-weighted scenario combinations — ACCESS-CM2 LA basin tas\n"
+                 "Dashed = individual SSPs; solid = weighted mixes for different policy priors")
+    ax.legend(loc="upper left", fontsize=8, ncol=2)
+    ax.grid(alpha=0.3)
+    return _save(fig, "fig_scenario_weighted_combine.png")
+
+
+def _real_per_scenario_weighting():
+    """
+    Per-scenario model weighting: same 3-model ensemble (ACCESS-CM2, GFDL-ESM4,
+    MRI-ESM2-0) but show how skill-weighted projections diverge from equal across
+    each SSP. Uses historically-trained weights (data already cached).
+    """
+    from rcmes_mcp.tools.data_access import load_reference_dataset
+    from rcmes_mcp.tools.analysis import (
+        calculate_model_weights,
+        apply_ensemble_weights,
+    )
+
+    # 1) Reference + 3-model historical ensemble (likely already cached)
+    ref_r = load_reference_dataset(
+        source="ncep-reanalysis-monthly",
+        start_date="1980-01-01", end_date="2014-12-31",
+        lat_min=32.0, lat_max=36.0, lon_min=-120.0, lon_max=-116.0,
+    )
+    if not ref_r.get("success"):
+        raise RuntimeError(f"reference load failed: {ref_r.get('error')}")
+    reference_id = ref_r["dataset_id"]
+
+    models = ["ACCESS-CM2", "GFDL-ESM4", "MRI-ESM2-0"]
+    series_hist = []
+    used = []
+    for m in models:
+        try:
+            data = _load("tas", m, "historical",
+                         "1980-01-01", "2014-12-31", **LA_BASIN)
+            monthly = data.resample(time="MS").mean()
+            try:
+                monthly = monthly.convert_calendar("standard", align_on="date", missing=np.nan)
+            except Exception:
+                pass
+            monthly = monthly.assign_coords(model=m).expand_dims("model")
+            series_hist.append(monthly)
+            used.append(m)
+        except Exception as e:
+            print(f"[deck]   skip historical {m}: {e}")
+    if len(series_hist) < 2:
+        raise RuntimeError("need ≥2 historical models")
+    hist_ensemble = xr.concat(series_hist, dim="model", join="outer")
+    hist_id = session_manager.store(
+        data=hist_ensemble, source="NEX-GDDP-CMIP6", variable="tas",
+        model=",".join(used), scenario="historical",
+        description=f"Hist ensemble {used} 1980-2014 LA basin",
+    )
+
+    # 2) Train weights once on historical (use 'combined')
+    wres = calculate_model_weights(
+        ensemble_dataset_id=hist_id, method="combined",
+        reference_dataset_id=reference_id,
+        train_start="1980-01-01", train_end="2014-12-31",
+        sigma_d=0.5, sigma_s=0.5,
+    )
+    if not wres.get("success"):
+        raise RuntimeError(f"weight training failed: {wres.get('error')}")
+    weights = wres["weights"]
+    print(f"[deck]   trained weights {used}: {weights}")
+
+    # 3) For each scenario, build the same 3-model ensemble and apply weights
+    scenarios = ["ssp126", "ssp245", "ssp585"]
+    fig, axes = plt.subplots(1, len(scenarios), figsize=(15, 4.5), sharey=True)
+    if len(scenarios) == 1:
+        axes = [axes]
+    for ax, sc in zip(axes, scenarios):
+        sc_series = []
+        sc_used = []
+        for m in used:
+            try:
+                data = _load("tas", m, sc, "2050-01-01", "2099-12-31", **LA_BASIN)
+                monthly = data.resample(time="MS").mean()
+                try:
+                    monthly = monthly.convert_calendar("standard", align_on="date", missing=np.nan)
+                except Exception:
+                    pass
+                monthly = monthly.assign_coords(model=m).expand_dims("model")
+                sc_series.append(monthly)
+                sc_used.append(m)
+            except Exception as e:
+                print(f"[deck]   skip {m}/{sc}: {e}")
+        if len(sc_series) < 2:
+            ax.set_title(f"{sc}\n(insufficient data)")
+            continue
+        sc_ensemble = xr.concat(sc_series, dim="model", join="outer")
+        sc_id = session_manager.store(
+            data=sc_ensemble, source="NEX-GDDP-CMIP6", variable="tas",
+            model=",".join(sc_used), scenario=sc,
+            description=f"{sc} ensemble {sc_used} LA basin",
+        )
+
+        # Sub-select weights to the models actually present in this scenario
+        keep_idx = [used.index(m) for m in sc_used if m in used]
+        w_sub = np.array([weights[i] for i in keep_idx], dtype=float)
+        w_sub = w_sub / w_sub.sum()
+
+        # Equal projection
+        equal_da = sc_ensemble.mean(dim="model")
+        eq_ts = equal_da.mean(dim=["lat", "lon"]).resample(time="1YS").mean().compute()
+
+        # Weighted projection via tool
+        ar = apply_ensemble_weights(ensemble_dataset_id=sc_id, weights=list(w_sub))
+        if not ar.get("success"):
+            ax.set_title(f"{sc} (weighting failed)")
+            continue
+        wds = session_manager.get(ar["dataset_id"])
+        wda = wds if isinstance(wds, xr.DataArray) else wds[list(wds.data_vars)[0]]
+        w_ts = wda.mean(dim=["lat", "lon"]).resample(time="1YS").mean().compute()
+
+        for ts, color, label in [(eq_ts, "#666", "equal"), (w_ts, "#c4321c", "skill+independence")]:
+            vals = ts.values
+            if float(vals.mean()) > 200:
+                vals = vals - 273.15
+            ref0 = float(vals[0])
+            anom = vals - ref0
+            kernel = np.ones(5) / 5
+            smoothed = np.convolve(anom, kernel, mode="same")
+            ax.plot(ts.time.values, anom, color=color, linewidth=0.6, alpha=0.3)
+            ax.plot(ts.time.values, smoothed, color=color, linewidth=2.0, label=label)
+        ax.set_title(sc.upper())
+        ax.set_xlabel("Year")
+        ax.grid(alpha=0.3)
+        ax.legend(loc="upper left", fontsize=8)
+    axes[0].set_ylabel("Δ T vs 2050 (°C)")
+    fig.suptitle(
+        f"Per-scenario projection: equal vs combined weighting "
+        f"({len(used)} models, weights trained on historical 1980–2014 vs NCEP)",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    return _save(fig, "fig_per_scenario_weighting.png")
+
+
+def _synth_scenario_weighted_combine():
+    """Synthetic placeholder for the scenario combiner figure."""
+    years = np.arange(2050, 2100)
+    base = np.linspace(0, 1, len(years))
+    fig, ax = plt.subplots(figsize=(11, 5.4))
+    ssp = {"ssp126": (1.0, "#1a9850"), "ssp245": (2.5, "#fdae61"),
+           "ssp370": (3.8, "#d73027"), "ssp585": (4.6, "#7f0000")}
+    for sc, (slope, c) in ssp.items():
+        ax.plot(years, slope * base, color=c, linestyle="--", linewidth=1.0, alpha=0.4, label=f"{sc} (raw)")
+    profiles = {"Equal": [0.25] * 4,
+                "Mitigation-aligned (Paris)": [0.45, 0.35, 0.15, 0.05],
+                "Current-policies": [0.05, 0.30, 0.40, 0.25],
+                "High-emissions risk": [0.05, 0.15, 0.30, 0.50]}
+    pcolors = ["#222", "#1f77b4", "#9467bd", "#d62728"]
+    slopes = np.array([1.0, 2.5, 3.8, 4.6])
+    for (label, w), c in zip(profiles.items(), pcolors):
+        eff = float(np.dot(slopes, w))
+        ax.plot(years, eff * base, color=c, linewidth=2.5, label=label)
+    ax.set_xlabel("Year"); ax.set_ylabel("Δ T vs 2050 (°C)")
+    ax.set_title("Probability-weighted scenario combinations (synthetic placeholder)")
+    ax.legend(loc="upper left", fontsize=8, ncol=2); ax.grid(alpha=0.3)
+    return _save(fig, "fig_scenario_weighted_combine.png")
+
+
+def _synth_per_scenario_weighting():
+    """Synthetic placeholder for per-scenario weighting figure."""
+    years = np.arange(2050, 2100)
+    base = np.linspace(0, 1, len(years))
+    scenarios = [("SSP126", 1.0), ("SSP245", 2.5), ("SSP585", 4.5)]
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5), sharey=True)
+    for ax, (sc, slope) in zip(axes, scenarios):
+        ax.plot(years, slope * base, color="#666", linewidth=2, label="equal")
+        ax.plot(years, 0.92 * slope * base + 0.1, color="#c4321c", linewidth=2, label="skill+independence")
+        ax.set_title(sc); ax.set_xlabel("Year"); ax.grid(alpha=0.3); ax.legend(loc="upper left", fontsize=8)
+    axes[0].set_ylabel("Δ T vs 2050 (°C)")
+    fig.suptitle("Per-scenario projection: equal vs combined weighting (synthetic placeholder)", fontsize=11)
+    fig.tight_layout()
+    return _save(fig, "fig_per_scenario_weighting.png")
+
+
+def _synth_weighting_validation():
+    """Two-panel synthetic skill scores + projection comparison."""
+    methods = list(_WEIGHT_METHOD_COLORS.keys())
+    colors = [_WEIGHT_METHOD_COLORS[m] for m in methods]
+    train_rmse = [1.10, 0.78, 1.02, 0.74]
+    test_rmse  = [1.18, 0.96, 1.05, 0.88]
+    test_corr  = [0.62, 0.74, 0.66, 0.79]
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    x = np.arange(len(methods))
+    bw = 0.35
+    axes[0].bar(x - bw / 2, train_rmse, bw, color=colors, alpha=0.55, label="train")
+    axes[0].bar(x + bw / 2, test_rmse, bw, color=colors, label="test")
+    axes[0].set_xticks(x); axes[0].set_xticklabels(methods, rotation=15)
+    axes[0].set_ylabel("Regional-mean RMSE vs reference (K)")
+    axes[0].set_title("Skill — lower is better"); axes[0].legend()
+    axes[0].grid(alpha=0.3, axis="y")
+
+    axes[1].bar(x, test_corr, color=colors)
+    axes[1].set_xticks(x); axes[1].set_xticklabels(methods, rotation=15)
+    axes[1].set_ylabel("Pearson r (test)")
+    axes[1].set_title("Correlation — higher is better")
+    axes[1].set_ylim(0, 1.05); axes[1].grid(alpha=0.3, axis="y")
+    fig.suptitle("Ensemble-weighting validation (synthetic placeholder)", fontsize=11)
+    fig.tight_layout()
+    _save(fig, "fig_weighting_validation.png")
+
+    # Comparison projections
+    years = np.arange(2050, 2100)
+    base = np.linspace(0, 4.0, len(years))
+    fig2, ax = plt.subplots(figsize=(10, 5))
+    multipliers = {"equal": 1.0, "skill": 0.92, "independence": 0.97, "combined": 0.88}
+    for m, c in zip(methods, colors):
+        proj = multipliers[m] * base + 0.18 * _RNG.standard_normal(len(years))
+        kernel = np.ones(5) / 5
+        smoothed = np.convolve(proj, kernel, mode="same")
+        ax.plot(years, proj, color=c, alpha=0.25, linewidth=0.6)
+        ax.plot(years, smoothed, color=c, linewidth=2, label=m)
+    ax.set_xlabel("Year"); ax.set_ylabel("Δ T vs 2050 (°C)")
+    ax.set_title("Weighted SSP5-8.5 projection comparison (synthetic placeholder)")
+    ax.grid(alpha=0.3); ax.legend(loc="upper left")
+    return _save(fig2, "fig_weighting_comparison.png")
+
+
 # ----------------------------------------------------------------------
 # Synthetic fallback generators (used when real data is unavailable)
 # ----------------------------------------------------------------------
@@ -660,7 +1135,15 @@ def _synth_change_and_agreement():
 # ----------------------------------------------------------------------
 # Dispatchers: try real data, fall back to synthetic on any failure
 # ----------------------------------------------------------------------
-def _try_real(real_fn, synth_fn, label):
+
+_SKIP_EXISTING = os.environ.get("RCMES_DECK_SKIP_EXISTING", "0") == "1"
+
+
+def _try_real(real_fn, synth_fn, label, expected_path=None):
+    # Fast path: if a fresh PNG already exists, skip the recompute
+    if _SKIP_EXISTING and expected_path and Path(expected_path).exists():
+        print(f"[deck] === Skipping '{label}' — using existing {expected_path} ===")
+        return expected_path
     if _REAL_AVAILABLE:
         try:
             print(f"\n[deck] === Building '{label}' from real RCMES data ===")
@@ -676,27 +1159,48 @@ def _try_real(real_fn, synth_fn, label):
 
 
 def make_anomaly_hovmoller_figure():
-    return _try_real(_real_anomaly_hovmoller, _synth_anomaly_hovmoller, "anomaly Hovmöller")
+    return _try_real(_real_anomaly_hovmoller, _synth_anomaly_hovmoller,
+                     "anomaly Hovmöller", str(FIG_DIR / "fig_anomaly_hovmoller.png"))
 
 
 def make_eof_figure():
-    return _try_real(_real_eof, _synth_eof, "EOF")
+    return _try_real(_real_eof, _synth_eof, "EOF", str(FIG_DIR / "fig_eof.png"))
 
 
 def make_ensemble_spread_figure():
-    return _try_real(_real_ensemble_spread, _synth_ensemble_spread, "ensemble spread")
+    return _try_real(_real_ensemble_spread, _synth_ensemble_spread,
+                     "ensemble spread", str(FIG_DIR / "fig_ensemble_spread.png"))
 
 
 def make_scenario_fan_figure():
-    return _try_real(_real_scenario_fan, _synth_scenario_fan, "scenario fan")
+    return _try_real(_real_scenario_fan, _synth_scenario_fan,
+                     "scenario fan", str(FIG_DIR / "fig_scenario_fan.png"))
 
 
 def make_emergence_figure():
-    return _try_real(_real_time_of_emergence, _synth_emergence, "time-of-emergence")
+    return _try_real(_real_time_of_emergence, _synth_emergence,
+                     "time-of-emergence", str(FIG_DIR / "fig_time_of_emergence.png"))
 
 
 def make_change_and_agreement_figure():
-    return _try_real(_real_change_and_agreement, _synth_change_and_agreement, "change + agreement")
+    return _try_real(_real_change_and_agreement, _synth_change_and_agreement,
+                     "change + agreement", str(FIG_DIR / "fig_change_and_agreement.png"))
+
+
+def make_weighting_validation_figure():
+    """Builds BOTH fig_weighting_validation.png and fig_weighting_comparison.png in one call."""
+    return _try_real(_real_weighting_validation, _synth_weighting_validation,
+                     "weighting validation", str(FIG_DIR / "fig_weighting_comparison.png"))
+
+
+def make_scenario_weighted_figure():
+    return _try_real(_real_scenario_weighted_combine, _synth_scenario_weighted_combine,
+                     "scenario combiner", str(FIG_DIR / "fig_scenario_weighted_combine.png"))
+
+
+def make_per_scenario_weighting_figure():
+    return _try_real(_real_per_scenario_weighting, _synth_per_scenario_weighting,
+                     "per-scenario weighting", str(FIG_DIR / "fig_per_scenario_weighting.png"))
 
 
 # Generate all figures up front so slide code can reference paths
@@ -706,6 +1210,10 @@ FIG_ENSEMBLE = make_ensemble_spread_figure()
 FIG_SCENARIO = make_scenario_fan_figure()
 FIG_TOE = make_emergence_figure()
 FIG_AGREEMENT = make_change_and_agreement_figure()
+FIG_WEIGHTING_COMPARISON = make_weighting_validation_figure()  # also writes fig_weighting_validation.png as a side effect
+FIG_WEIGHTING_VALIDATION = str(FIG_DIR / "fig_weighting_validation.png")
+FIG_SCENARIO_WEIGHTED = make_scenario_weighted_figure()
+FIG_PER_SCENARIO_WEIGHTING = make_per_scenario_weighting_figure()
 
 
 # ============================================================
@@ -799,7 +1307,7 @@ for p in slide.placeholders:
 # ============================================================
 slide = prs.slides.add_slide(TITLE_CONTENT)
 set_placeholder_text(slide, 17, "RCMES-MCP")
-set_placeholder_text(slide, 0, "42+ Climate Analysis Tools")
+set_placeholder_text(slide, 0, "47+ Climate Analysis Tools")
 set_footer(slide)
 
 for p in slide.placeholders:
@@ -811,6 +1319,7 @@ for p in slide.placeholders:
             "Statistical Analysis — Climatology, trend with significance, bias, RMSE, correlation, EOF/PCA decomposition",
             "Spatiotemporal Detection — 3D connected-component extreme-event cataloguing, time of emergence",
             "Ensemble & Scenario — Multi-model statistics with IPCC-style agreement maps, scenario-comparison fan charts",
+            "Ensemble Weighting — Skill / independence / combined weighting (Knutti 2017) validated against NCEP reanalysis observations",
             "Extreme Indices — 22 ETCCDI indices, heatwave & drought analysis",
             "Visualization — Spatial maps, time series, Hovmöller diagrams, fan charts, ensemble spread plots, Taylor diagrams",
         ]
@@ -1062,7 +1571,114 @@ add_figure_slide(
 
 
 # ============================================================
-# SLIDE 14: Current Status — Two Content
+# SLIDE 14: Ensemble Weighting — Methods Overview
+# ============================================================
+slide = prs.slides.add_slide(TITLE_CONTENT)
+set_placeholder_text(slide, 17, "RCMES-MCP")
+set_placeholder_text(slide, 0, "Ensemble Weighting — Beyond Equal Votes")
+set_footer(slide)
+
+for p in slide.placeholders:
+    if p.placeholder_format.idx == 19:
+        tf = p.text_frame
+        items = [
+            "Default IPCC ensemble averaging treats every model as equally credible — "
+            "but CMIP6 has lots of shared lineage (e.g., CESM2 ↔ NorESM2 share atmosphere)",
+            "Four schemes implemented (Knutti et al. 2017; Brunner & Knutti 2020):  "
+            "(1) Equal — democratic baseline;  "
+            "(2) Skill — w ∝ exp(−RMSE² / σ²) against reference observations;  "
+            "(3) Independence — penalise pairs of models with low inter-model RMSE;  "
+            "(4) Combined — skill × independence, AR6 operational style",
+            "load_reference_dataset → calculate_model_weights → apply_ensemble_weights → "
+            "weighted projections; validate_ensemble_weighting splits time into train/test "
+            "to score generalization against held-out observations",
+            "Active collaboration with Elias Massound and Arielle on ensemble calibration paper",
+        ]
+        add_bullet_content(tf, items, font_size=Pt(13))
+
+
+# ============================================================
+# SLIDE 15: Weighting Validation — Skill Scores
+# ============================================================
+add_figure_slide(
+    "Validating Weighting Schemes Against NCEP Reanalysis",
+    FIG_WEIGHTING_VALIDATION,
+    [
+        "validate_ensemble_weighting trains each scheme on 1980–2002 historical and "
+        "scores it on the held-out 2003–2014 window against NCEP/NCAR Reanalysis 1",
+        "Left: regional-mean RMSE (lower = better); right: Pearson correlation "
+        "of monthly anomalies (higher = better)",
+        "Skill-aware schemes typically beat the equal vote when one model substantially "
+        "outperforms peers on the regional climatology",
+        "Honest framing: only 3 models in this demo — the methodology generalizes to the "
+        "full 35-model NEX-GDDP-CMIP6 set",
+    ],
+)
+
+
+# ============================================================
+# SLIDE 16: Weighted SSP5-8.5 Projections — Method Comparison
+# ============================================================
+add_figure_slide(
+    "Weighted Future Projections by Method",
+    FIG_WEIGHTING_COMPARISON,
+    [
+        "Each colour applies a different trained weight set to the SAME SSP5-8.5 "
+        "ensemble (3 models, LA basin, 2050–2099) — the spread between curves is "
+        "the structural uncertainty introduced by your weighting choice",
+        "When weighting methods disagree by ~0.5 °C late-century, that's the "
+        "ensemble-weighting uncertainty band you'd quote alongside model spread",
+        "Skill and combined typically tilt the projection toward the model that "
+        "best reproduces observations; independence damps clustered-model influence",
+        "All four projections are saved as new dataset_ids — feed any into "
+        "generate_map / calculate_trend / calculate_time_of_emergence as usual",
+    ],
+)
+
+
+# ============================================================
+# SLIDE 17: Probabilistic Scenario Combining
+# ============================================================
+add_figure_slide(
+    "Probabilistic Scenario Combining",
+    FIG_SCENARIO_WEIGHTED,
+    [
+        "combine_scenarios_weighted — assign prior probabilities to each SSP and "
+        "produce a single weighted-mean projection. Use when the question is "
+        "\"what's the expected warming under our best guess of which pathway "
+        "society will follow?\"",
+        "Dashed lines: individual SSPs (raw). Solid lines: 4 different policy "
+        "weight profiles applied to the same 4-scenario set",
+        "Mitigation-aligned (Paris) puts most weight on ssp126/245; "
+        "Current-policies favours ssp245/370; High-emissions risk loads ssp585",
+        "Output is a normal dataset_id — chain into generate_map / generate_timeseries_plot "
+        "/ detect_extreme_events to do downstream analysis on the weighted projection",
+    ],
+)
+
+
+# ============================================================
+# SLIDE 18: Per-Scenario Model Weighting
+# ============================================================
+add_figure_slide(
+    "Model Weighting Across Scenarios",
+    FIG_PER_SCENARIO_WEIGHTING,
+    [
+        "Same 3-model ensemble + same historically-trained weights, applied to "
+        "each SSP scenario independently — does weighting shift each scenario's "
+        "projection in the same way?",
+        "If the skill-favoured model warms faster than the unweighted mean, "
+        "weighted projections are higher across ALL scenarios (consistent tilt)",
+        "Useful diagnostic: lets you carry one trained weight vector through every "
+        "downstream analysis — no need to re-train per scenario",
+        "Pair with combine_scenarios_weighted to first weight models within each "
+        "scenario, then weight scenarios by policy probability",
+    ],
+)
+
+
+# ============================================================
+# SLIDE 19: Current Status — Two Content
 # (was SLIDE 7 — renumbered)
 # ============================================================
 slide = prs.slides.add_slide(TWO_CONTENT)
@@ -1133,7 +1749,7 @@ for p in slide.placeholders:
 
 
 # ============================================================
-# SLIDE 15: Path Forward — Two Content
+# SLIDE 20: Path Forward — Two Content
 # ============================================================
 slide = prs.slides.add_slide(TWO_CONTENT)
 set_placeholder_text(slide, 17, "RCMES-MCP")
@@ -1193,7 +1809,7 @@ for p in slide.placeholders:
 
 
 # ============================================================
-# SLIDE 16: Closing slide
+# SLIDE 21: Closing slide
 # ============================================================
 slide = prs.slides.add_slide(CLOSING)
 set_footer(slide)
