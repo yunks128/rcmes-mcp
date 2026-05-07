@@ -1,0 +1,109 @@
+version: "3.9"
+
+# RCMES-MCP + MMGIS Integrated Stack
+#
+# Services:
+#   rcmes-mcp   — Python MCP server + FastAPI (port 8000)
+#   mmgis       — MMGIS web GIS platform (port 2888)
+#   db          — PostgreSQL + PostGIS backend for MMGIS (port 5432)
+#   titiler     — Cloud-Optimized GeoTIFF tile server (port 8080)
+#
+# Usage:
+#   cp .env.example .env   # fill in passwords and API keys
+#   docker compose up -d
+#   open http://localhost:2888   # MMGIS map UI
+
+volumes:
+  pgdata:        # persistent PostgreSQL data
+  climate_data:  # shared COG/GeoJSON output between rcmes-mcp and titiler/mmgis
+
+services:
+
+  # ─── PostgreSQL + PostGIS (required by MMGIS) ─────────────────────────────
+  db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-mmgis}
+      POSTGRES_USER: ${DB_USER:-mmgis}
+      POSTGRES_PASSWORD: ${DB_PASS:?DB_PASS is required — set it in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-mmgis} -d ${DB_NAME:-mmgis}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─── TiTiler: Cloud-Optimized GeoTIFF streaming ──────────────────────────
+  titiler:
+    image: ghcr.io/developmentseed/titiler:latest
+    restart: unless-stopped
+    ports:
+      - "${TITILER_PORT:-8080}:8080"
+    environment:
+      # Allow RCMES COG files from the shared volume to be served
+      TITILER_API_CORS_ORIGINS: "*"
+      TITILER_API_CACHECONTROL: "public, max-age=3600"
+    volumes:
+      - climate_data:/data:ro
+
+  # ─── MMGIS: Web GIS Platform ──────────────────────────────────────────────
+  mmgis:
+    image: ghcr.io/nasa-ammos/mmgis:latest
+    restart: unless-stopped
+    ports:
+      - "${MMGIS_PORT:-2888}:2888"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Database
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-mmgis}
+      DB_USER: ${DB_USER:-mmgis}
+      DB_PASS: ${DB_PASS}
+      # MMGIS identity
+      EXTERNAL_URL: ${MMGIS_EXTERNAL_URL:-http://localhost:2888}
+      AUTH: none
+      # Optional: long-term API token for programmatic access
+      MMGIS_SETUP_ADMIN_USERNAME: ${MMGIS_ADMIN_USER:-admin}
+      MMGIS_SETUP_ADMIN_PASSWORD: ${MMGIS_ADMIN_PASS:-changeme}
+      MMGIS_SETUP_SUPERADMIN_TOKEN: ${MMGIS_API_TOKEN:-rcmes-dev-token}
+      NODE_ENV: production
+    volumes:
+      - climate_data:/mmgis/Missions:rw  # MMGIS mission file storage
+
+  # ─── RCMES-MCP: Python MCP Server + FastAPI ───────────────────────────────
+  rcmes-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${RCMES_PORT:-8000}:8000"
+    depends_on:
+      - mmgis
+      - titiler
+    environment:
+      # Azure OpenAI (optional — only needed for rcmes-chat)
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-gpt-4o}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-10-21}
+      # RCMES
+      RCMES_CACHE_DIR: /data/cache
+      RCMES_SESSION_TTL: ${RCMES_SESSION_TTL:-2}
+      # MMGIS integration
+      MMGIS_URL: http://mmgis:2888
+      MMGIS_EXTERNAL_URL: ${MMGIS_EXTERNAL_URL:-http://localhost:2888}
+      MMGIS_MISSION: ${MMGIS_MISSION:-climate}
+      MMGIS_API_TOKEN: ${MMGIS_API_TOKEN:-rcmes-dev-token}
+      MMGIS_TITILER_URL: http://titiler:8080
+      MMGIS_TITILER_EXTERNAL_URL: ${MMGIS_TITILER_EXTERNAL_URL:-http://localhost:8080}
+      MMGIS_DATA_DIR: /data/layers
+    volumes:
+      - climate_data:/data:rw
+    command: >
+      sh -c "python scripts/init_mmgis.py && python -m rcmes_mcp.api"

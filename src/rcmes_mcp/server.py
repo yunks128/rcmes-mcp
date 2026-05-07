@@ -22,22 +22,30 @@ mcp = FastMCP(
     - Compute ETCCDI climate extreme indices (heatwaves, drought, etc.)
     - Evaluate climate models against observations
     - Generate visualizations (maps, time series, Taylor diagrams)
+    - Export climate data as Cloud-Optimized GeoTIFFs or GeoJSON for MMGIS
+    - Push climate layers directly into a running MMGIS web GIS instance
 
     When users ask about climate trends:
     1. Clarify the geographic region of interest
     2. Clarify the time period (historical or future projections)
     3. For future projections, clarify the emissions scenario (SSP)
     4. Use appropriate tools to load, analyze, and visualize data
+    5. Optionally export and push results to MMGIS for interactive map display
 
     Available scenarios for future projections:
     - SSP1-2.6: Low emissions, sustainable development
     - SSP2-4.5: Middle of the road
     - SSP3-7.0: Regional rivalry, high emissions
     - SSP5-8.5: Fossil-fueled development, very high emissions
+
+    MMGIS workflow (when running docker compose stack):
+    - export_climate_geotiff → export_climate_geojson → push_layer_to_mmgis
+    - The browser_url in the push result opens the live interactive map
     """
 )
 
 # Import and register tools from submodules
+from rcmes_mcp.tools import analysis, code_execution, data_access, indices, mmgis, processing, visualization  # noqa: F401, E402
 
 # Import and register resources
 

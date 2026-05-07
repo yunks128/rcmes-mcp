@@ -42,7 +42,7 @@ from rcmes_mcp.utils.session import session_manager
 configure_logging()
 
 # Import RCMES tools
-from rcmes_mcp.tools import analysis, code_execution, data_access, indices, processing, visualization
+from rcmes_mcp.tools import analysis, code_execution, data_access, indices, mmgis, processing, visualization
 
 logger = logging.getLogger("rcmes.api")
 
@@ -2180,6 +2180,37 @@ async def serve_image(filename: str):
         filepath,
         media_type="image/png",
         headers={"Cache-Control": "no-cache, max-age=0"},
+    )
+
+
+# ============================================================================
+# MMGIS Layer File Serving
+# Serves COG and GeoJSON files written by export_climate_geotiff /
+# export_climate_geojson so that TiTiler and MMGIS can fetch them.
+# ============================================================================
+
+_MMGIS_DATA_DIR = Path(os.environ.get("MMGIS_DATA_DIR", "/data/layers"))
+
+
+@app.get("/files/{filename}")
+async def serve_layer_file(filename: str):
+    """Serve a COG or GeoJSON layer file for MMGIS / TiTiler consumption."""
+    # Prevent path traversal
+    safe_name = Path(filename).name
+    filepath = _MMGIS_DATA_DIR / safe_name
+    if not filepath.exists() or not filepath.is_file():
+        raise HTTPException(status_code=404, detail=f"Layer file '{safe_name}' not found")
+    media_type = (
+        "application/geo+json" if safe_name.endswith(".geojson")
+        else "image/tiff"
+    )
+    return FileResponse(
+        filepath,
+        media_type=media_type,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=3600",
+        },
     )
 
 
