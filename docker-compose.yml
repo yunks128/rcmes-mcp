@@ -67,6 +67,7 @@ services:
       # MMGIS identity
       EXTERNAL_URL: ${MMGIS_EXTERNAL_URL:-http://localhost:8502/mmgis}
       ROOT_PATH: /mmgis
+      MAIN_MISSION: climate
       AUTH: none
       # Optional: long-term API token for programmatic access
       MMGIS_SETUP_ADMIN_USERNAME: ${MMGIS_ADMIN_USER:-admin}
