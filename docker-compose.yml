@@ -40,7 +40,7 @@ services:
     image: ghcr.io/developmentseed/titiler:latest
     restart: unless-stopped
     ports:
-      - "${TITILER_PORT:-8080}:8080"
+      - "${TITILER_PORT:-8080}:80"
     environment:
       # Allow RCMES COG files from the shared volume to be served
       TITILER_API_CORS_ORIGINS: "*"
@@ -53,7 +53,7 @@ services:
     image: ghcr.io/nasa-ammos/mmgis:latest
     restart: unless-stopped
     ports:
-      - "${MMGIS_PORT:-2888}:2888"
+      - "${MMGIS_PORT:-2888}:8888"
     depends_on:
       db:
         condition: service_healthy

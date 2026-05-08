@@ -116,7 +116,9 @@ def mission_exists(
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
-        return resp.json().get("status") == "success"
+        data = resp.json()
+        # MMGIS returns the config dict directly (no status wrapper) for public GETs
+        return "mission" in data or data.get("status") == "success"
     except Exception:
         return False
 
