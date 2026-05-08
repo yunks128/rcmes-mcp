@@ -1010,7 +1010,7 @@ def _get_chat_tools() -> list[dict]:
                         "dataset_id": {"type": "string"},
                         "average_over": {"type": "string", "enum": ["lat", "lon"], "default": "lon"},
                         "title": {"type": "string"},
-                        "colormap": {"type": "string", "default": "RdBu_r"},
+                        "colormap": {"type": "string", "default": "rdbu_r"},
                     },
                     "required": ["dataset_id"],
                 },
@@ -1532,7 +1532,7 @@ def _build_system_prompt() -> str:
         "-> generate_map(spatial_dataset_id) AND generate_timeseries_plot([pc_dataset_id])\n\n"
         "**Multi-model ensemble** (IPCC-style with model agreement):\n"
         "  load_multi_model_ensemble(models=[5 picks]) -> calculate_ensemble_statistics(baseline_start, baseline_end) "
-        "-> generate_map(agreement_id, colormap='RdBu_r') AND generate_ensemble_spread_plot(ensemble_dataset_id)\n\n"
+        "-> generate_map(agreement_id, colormap='rdbu_r') AND generate_ensemble_spread_plot(ensemble_dataset_id)\n\n"
         "**Scenario comparison** (low vs high emissions):\n"
         "  compare_scenarios(scenarios=['ssp126','ssp245','ssp585']) "
         "-> generate_scenario_fan_chart(per_scenario mapping) AND generate_map(differences[i].dataset_id)\n\n"
@@ -1586,7 +1586,7 @@ def _build_system_prompt() -> str:
         "You CAN push climate analysis results directly into the live MMGIS map. "
         "Use this workflow when the user asks to 'push to MMGIS', 'show on map', or 'visualize in MMGIS':\n"
         "1. export_climate_geotiff(dataset_id) → returns cog_url\n"
-        "2. push_layer_to_mmgis(layer_name, cog_url, layer_type='tile', colormap='RdBu_r') → returns browser_url\n"
+        "2. push_layer_to_mmgis(layer_name, cog_url, layer_type='tile', colormap='rdbu_r') → returns browser_url\n"
         "Then tell the user to open the browser_url to see the layer in MMGIS.\n"
         "For vector/point data, use export_climate_geojson + layer_type='vector' instead.\n"
         "MMGIS is already running and connected — always attempt the push, never say you can't do it."
@@ -2324,7 +2324,7 @@ class PushToMMGISRequest(BaseModel):
     layer_name: str
     data_url: str
     layer_type: str = "tile"
-    colormap: str = "RdBu_r"
+    colormap: str = "rdbu_r"
     description: str = ""
     opacity: float = 0.8
 
@@ -2442,8 +2442,50 @@ async def mmgis_proxy(path: str, request: Request):
     )
 
 
+# Forwards /titiler/* → http://localhost:8080/* so TiTiler is reachable through
+# the already-open port 8502 without needing a separate firewall rule.
 
-# Serve React app static files if built
+@app.api_route(
+    "/titiler/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+)
+async def titiler_proxy(path: str, request: Request):
+    """Transparent reverse proxy to the internal TiTiler container."""
+    import httpx as _httpx
+
+    _titiler_base = os.environ.get("TITILER_INTERNAL_URL", "http://127.0.0.1:8080")
+    target = f"{_titiler_base.rstrip('/')}/{path}"
+    qs = request.url.query
+    if qs:
+        target = f"{target}?{qs}"
+
+    body = await request.body()
+    skip = {"host", "connection", "transfer-encoding", "te", "trailers", "upgrade"}
+    fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in skip}
+    fwd_headers["host"] = _titiler_base.split("//", 1)[-1].split("/")[0]
+    fwd_headers["accept-encoding"] = "identity"
+
+    async with _httpx.AsyncClient(follow_redirects=True, timeout=60) as client:
+        resp = await client.request(
+            method=request.method,
+            url=target,
+            headers=fwd_headers,
+            content=body,
+        )
+
+    resp_headers = dict(resp.headers)
+    resp_headers.pop("transfer-encoding", None)
+    resp_headers.pop("content-encoding", None)
+
+    from fastapi.responses import Response as _Resp
+    return _Resp(
+        content=resp.content,
+        status_code=resp.status_code,
+        headers=resp_headers,
+        media_type=resp.headers.get("content-type"),
+    )
+
+
 if STATIC_DIR.exists():
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
 

@@ -146,15 +146,40 @@ def build_tile_layer(
     name: str,
     cog_url: str,
     description: str = "",
-    colormap: str = "RdBu_r",
+    colormap: str = "rdbu_r",
     opacity: float = 0.8,
     titiler_url: str | None = None,
+    rescale_min: float | None = None,
+    rescale_max: float | None = None,
 ) -> dict[str, Any]:
-    """Build an MMGIS tile layer definition that streams a COG via TiTiler."""
-    titiler_url = titiler_url or _titiler_url()
+    """Build an MMGIS tile layer definition that streams a COG via TiTiler.
+
+    Uses the /titiler/ proxy path so tiles are served through port 8502.
+    Auto-fetches data stats for rescale range if not provided.
+    """
+    rcmes_external = os.environ.get("RCMES_EXTERNAL_URL", "http://localhost:8502")
+    titiler_internal = os.environ.get("TITILER_INTERNAL_URL", "http://127.0.0.1:8080")
+    titiler_proxy = f"{rcmes_external.rstrip('/')}/titiler"
+
+    # Fetch statistics to determine rescale range
+    if rescale_min is None or rescale_max is None:
+        try:
+            stats_resp = httpx.get(
+                f"{titiler_internal.rstrip('/')}/cog/statistics",
+                params={"url": cog_url},
+                timeout=REQUEST_TIMEOUT,
+            )
+            if stats_resp.status_code == 200:
+                stats = stats_resp.json().get("b1", {})
+                rescale_min = stats.get("percentile_2", stats.get("min", 0))
+                rescale_max = stats.get("percentile_98", stats.get("max", 1))
+        except Exception:
+            rescale_min = rescale_min or 0
+            rescale_max = rescale_max or 1
+
     tile_url = (
-        f"{titiler_url.rstrip('/')}/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
-        f"?url={cog_url}&colormap_name={colormap}&rescale=auto"
+        f"{titiler_proxy}/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
+        f"?url={cog_url}&colormap_name={colormap}&rescale={rescale_min},{rescale_max}"
     )
     return {
         "name": name,

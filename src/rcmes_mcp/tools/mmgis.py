@@ -142,6 +142,14 @@ def export_climate_geotiff(
     if da.dims[-2:] != (lat_dim, lon_dim):
         da = da.transpose(..., lat_dim, lon_dim)
 
+    # Ensure lat is descending (north-up) and lon is in -180/180 range
+    if len(da[lat_dim]) > 1 and da[lat_dim].values[0] < da[lat_dim].values[-1]:
+        da = da.isel({lat_dim: slice(None, None, -1)})
+    lon_vals = da[lon_dim].values
+    if lon_vals.max() > 180:
+        da[lon_dim] = (da[lon_dim] + 180) % 360 - 180
+        da = da.sortby(lon_dim)
+
     # Write CRS first, then set spatial dims so rioxarray can find them
     da = da.rio.write_crs("EPSG:4326", inplace=False)
     da = da.rio.set_spatial_dims(x_dim=lon_dim, y_dim=lat_dim)
@@ -362,7 +370,7 @@ def push_layer_to_mmgis(
     mmgis_url: str | None = None,
     mission: str | None = None,
     api_token: str | None = None,
-    colormap: str = "RdBu_r",
+    colormap: str = "rdbu_r",
     description: str = "",
     opacity: float = 0.8,
 ) -> dict:
@@ -384,7 +392,7 @@ def push_layer_to_mmgis(
         mission: MMGIS mission name (overrides MMGIS_MISSION env var).
         api_token: Long-term API token (overrides MMGIS_API_TOKEN env var).
         colormap: Matplotlib/TiTiler colormap name for tile layers (e.g.
-                  "RdBu_r", "viridis", "plasma", "coolwarm"). Ignored for vector.
+                  "rdbu_r", "viridis", "plasma", "coolwarm"). Ignored for vector.
         description: Human-readable description shown in MMGIS layer panel.
         opacity: Layer opacity 0.0–1.0 (default 0.8).
 
