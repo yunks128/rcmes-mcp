@@ -2276,7 +2276,7 @@ async def serve_image(filename: str):
 # export_climate_geojson so that TiTiler and MMGIS can fetch them.
 # ============================================================================
 
-_MMGIS_DATA_DIR = Path(os.environ.get("MMGIS_DATA_DIR", "/data/layers"))
+_MMGIS_DATA_DIR = Path(os.environ.get("MMGIS_DATA_DIR", str(Path.home() / ".rcmes" / "layers")))
 
 
 @app.get("/files/{filename}")
@@ -2387,7 +2387,8 @@ async def api_push_to_mmgis(req: PushToMMGISRequest):
 # the already-open port 8502 without needing a separate firewall rule.
 # ============================================================================
 
-_MMGIS_INTERNAL_URL = os.environ.get("MMGIS_URL", "http://localhost:2888")
+def _get_mmgis_internal_url() -> str:
+    return os.environ.get("MMGIS_URL", "http://127.0.0.1:2888/mmgis")
 
 
 @app.api_route(
@@ -2398,7 +2399,8 @@ async def mmgis_proxy(path: str, request: Request):
     """Transparent reverse proxy to the internal MMGIS container."""
     import httpx as _httpx
 
-    target = f"{_MMGIS_INTERNAL_URL.rstrip('/')}/mmgis/{path}"
+    _base = _get_mmgis_internal_url()
+    target = f"{_base.rstrip('/')}/{path}"
     qs = request.url.query
     if qs:
         target = f"{target}?{qs}"
@@ -2409,7 +2411,7 @@ async def mmgis_proxy(path: str, request: Request):
     # Strip hop-by-hop headers; rewrite Host
     skip = {"host", "connection", "transfer-encoding", "te", "trailers", "upgrade"}
     fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in skip}
-    fwd_headers["host"] = _MMGIS_INTERNAL_URL.split("//", 1)[-1].split("/")[0]
+    fwd_headers["host"] = _base.split("//", 1)[-1].split("/")[0]
     # Request uncompressed so the proxy can forward raw bytes without encoding mismatch
     fwd_headers["accept-encoding"] = "identity"
 
@@ -2427,9 +2429,8 @@ async def mmgis_proxy(path: str, request: Request):
     resp_headers.pop("content-encoding", None)
     if "location" in resp_headers:
         loc = resp_headers["location"]
-        mmgis_base = _MMGIS_INTERNAL_URL.rstrip("/")
+        mmgis_base = _base.rstrip("/")
         if loc.startswith(mmgis_base):
-            # Strip the internal base; /mmgis prefix already present in path
             resp_headers["location"] = loc[len(mmgis_base):]
 
     from fastapi.responses import Response as _Resp
