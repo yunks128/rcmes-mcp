@@ -2215,7 +2215,87 @@ async def serve_layer_file(filename: str):
 
 
 # ============================================================================
-# MMGIS Reverse Proxy
+# MMGIS Integration Endpoints
+# ============================================================================
+
+class ExportGeoTIFFRequest(BaseModel):
+    dataset_id: str
+    variable: str | None = None
+    time_aggregation: str = "mean"
+    time_index: int | None = None
+    output_filename: str | None = None
+
+
+class ExportGeoJSONRequest(BaseModel):
+    dataset_id: str
+    variable: str | None = None
+    statistic: str = "mean"
+    output_filename: str | None = None
+
+
+class PushToMMGISRequest(BaseModel):
+    layer_name: str
+    data_url: str
+    layer_type: str = "tile"
+    colormap: str = "RdBu_r"
+    description: str = ""
+    opacity: float = 0.8
+
+
+@app.post("/api/export-geotiff")
+async def api_export_geotiff(req: ExportGeoTIFFRequest):
+    """Export a session dataset to a Cloud-Optimized GeoTIFF served by TiTiler."""
+    result = await asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: mmgis.export_climate_geotiff(
+            dataset_id=req.dataset_id,
+            variable=req.variable,
+            time_aggregation=req.time_aggregation,
+            time_index=req.time_index,
+            output_filename=req.output_filename,
+        ),
+    )
+    if "error" in result.get("status", ""):
+        raise HTTPException(status_code=500, detail=result)
+    return result
+
+
+@app.post("/api/export-geojson")
+async def api_export_geojson(req: ExportGeoJSONRequest):
+    """Export a session dataset to a GeoJSON feature collection."""
+    result = await asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: mmgis.export_climate_geojson(
+            dataset_id=req.dataset_id,
+            variable=req.variable,
+            statistic=req.statistic,
+            output_filename=req.output_filename,
+        ),
+    )
+    if "error" in result.get("status", ""):
+        raise HTTPException(status_code=500, detail=result)
+    return result
+
+
+@app.post("/api/push-to-mmgis")
+async def api_push_to_mmgis(req: PushToMMGISRequest):
+    """Push a COG or GeoJSON layer into MMGIS as a live map layer."""
+    result = await asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: mmgis.push_layer_to_mmgis(
+            layer_name=req.layer_name,
+            data_url=req.data_url,
+            layer_type=req.layer_type,
+            colormap=req.colormap,
+            description=req.description,
+            opacity=req.opacity,
+        ),
+    )
+    if result.get("status") == "error":
+        raise HTTPException(status_code=500, detail=result)
+    return result
+
+
 # Forwards /mmgis/* → http://localhost:2888/* so MMGIS is reachable through
 # the already-open port 8502 without needing a separate firewall rule.
 # ============================================================================
