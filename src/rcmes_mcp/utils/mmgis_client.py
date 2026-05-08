@@ -15,13 +15,17 @@ import httpx
 
 logger = logging.getLogger("rcmes.utils.mmgis_client")
 
-# Defaults pulled from environment (overridable per-call)
-_DEFAULT_MMGIS_URL = os.environ.get("MMGIS_URL", "http://localhost:2888")
-_DEFAULT_MISSION = os.environ.get("MMGIS_MISSION", "climate")
-_DEFAULT_TOKEN = os.environ.get("MMGIS_API_TOKEN", "")
-_DEFAULT_TITILER_EXTERNAL = os.environ.get(
-    "MMGIS_TITILER_EXTERNAL_URL", "http://localhost:8080"
-)
+def _mmgis_url() -> str:
+    return os.environ.get("MMGIS_URL", "http://localhost:2888")
+
+def _mmgis_mission() -> str:
+    return os.environ.get("MMGIS_MISSION", "climate")
+
+def _mmgis_token() -> str:
+    return os.environ.get("MMGIS_API_TOKEN", "")
+
+def _titiler_url() -> str:
+    return os.environ.get("MMGIS_TITILER_EXTERNAL_URL", "http://localhost:8080")
 
 REQUEST_TIMEOUT = 30.0
 
@@ -37,14 +41,17 @@ def _auth_headers(token: str) -> dict[str, str]:
 
 
 def get_mission_config(
-    url: str = _DEFAULT_MMGIS_URL,
-    mission: str = _DEFAULT_MISSION,
-    token: str = _DEFAULT_TOKEN,
+    url: str | None = None,
+    mission: str | None = None,
+    token: str | None = None,
 ) -> dict[str, Any]:
     """Fetch the current configuration object for a mission.
 
     Returns the parsed config dict on success, raises on HTTP or API error.
     """
+    url = url or _mmgis_url()
+    mission = mission or _mmgis_mission()
+    token = token if token is not None else _mmgis_token()
     resp = httpx.get(
         f"{url.rstrip('/')}/api/configure/get",
         params={"mission": mission, "full": True},
@@ -53,21 +60,26 @@ def get_mission_config(
     )
     resp.raise_for_status()
     data = resp.json()
-    if data.get("status") != "success":
+    # With ?full=true: {"status": "success", "config": {...}, "mission": ..., "version": ...}
+    # Without full: returns the config dict directly (no wrapper)
+    if "status" in data:
+        if data.get("status") == "success":
+            return data["config"]
         raise RuntimeError(f"MMGIS get_mission_config failed: {data.get('message')}")
-    return data.get("config", {})
+    # Direct config dict (no wrapper)
+    return data
 
 
 def upsert_mission_config(
     config: dict[str, Any],
-    url: str = _DEFAULT_MMGIS_URL,
-    mission: str = _DEFAULT_MISSION,
-    token: str = _DEFAULT_TOKEN,
+    url: str | None = None,
+    mission: str | None = None,
+    token: str | None = None,
 ) -> dict[str, Any]:
-    """Push an updated mission configuration back to MMGIS.
-
-    Returns the upsert response dict (includes 'version').
-    """
+    """Push an updated mission configuration back to MMGIS."""
+    url = url or _mmgis_url()
+    mission = mission or _mmgis_mission()
+    token = token if token is not None else _mmgis_token()
     resp = httpx.post(
         f"{url.rstrip('/')}/api/configure/upsert",
         json={"mission": mission, "config": config, "forceClientUpdate": True},
@@ -83,10 +95,12 @@ def upsert_mission_config(
 
 def add_mission(
     mission: str,
-    url: str = _DEFAULT_MMGIS_URL,
-    token: str = _DEFAULT_TOKEN,
+    url: str | None = None,
+    token: str | None = None,
 ) -> dict[str, Any]:
     """Create a new MMGIS mission with a minimal base config."""
+    url = url or _mmgis_url()
+    token = token if token is not None else _mmgis_token()
     base_config = _base_mission_config(mission)
     resp = httpx.post(
         f"{url.rstrip('/')}/api/configure/add",
@@ -104,10 +118,12 @@ def add_mission(
 
 def mission_exists(
     mission: str,
-    url: str = _DEFAULT_MMGIS_URL,
-    token: str = _DEFAULT_TOKEN,
+    url: str | None = None,
+    token: str | None = None,
 ) -> bool:
     """Return True if the named mission already exists in MMGIS."""
+    url = url or _mmgis_url()
+    token = token if token is not None else _mmgis_token()
     try:
         resp = httpx.get(
             f"{url.rstrip('/')}/api/configure/get",
@@ -117,8 +133,8 @@ def mission_exists(
         )
         resp.raise_for_status()
         data = resp.json()
-        # MMGIS returns the config dict directly (no status wrapper) for public GETs
-        return "mission" in data or data.get("status") == "success"
+        # MMGIS returns the config dict directly — presence of "msv" or "layers" means mission exists.
+        return "msv" in data or "layers" in data or data.get("status") == "success"
     except Exception:
         return False
 
@@ -132,13 +148,10 @@ def build_tile_layer(
     description: str = "",
     colormap: str = "RdBu_r",
     opacity: float = 0.8,
-    titiler_url: str = _DEFAULT_TITILER_EXTERNAL,
+    titiler_url: str | None = None,
 ) -> dict[str, Any]:
-    """Build an MMGIS tile layer definition that streams a COG via TiTiler.
-
-    The resulting tile URL pattern uses TiTiler's /cog/tiles endpoint so that
-    MMGIS can render the GeoTIFF as an XYZ raster tile layer.
-    """
+    """Build an MMGIS tile layer definition that streams a COG via TiTiler."""
+    titiler_url = titiler_url or _titiler_url()
     tile_url = (
         f"{titiler_url.rstrip('/')}/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
         f"?url={cog_url}&colormap_name={colormap}&rescale=auto"
@@ -149,7 +162,12 @@ def build_tile_layer(
         "url": tile_url,
         "description": description,
         "opacity": opacity,
+        "initialOpacity": opacity,
         "on": True,
+        "minZoom": 0,
+        "maxNativeZoom": 18,
+        "maxZoom": 20,
+        "tileformat": "xyz",
         "legend": {"type": "colorbar", "colormap": colormap},
     }
 

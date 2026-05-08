@@ -24,22 +24,16 @@ from rcmes_mcp.server import mcp
 from rcmes_mcp.utils.session import session_manager
 
 # Shared data directory written by rcmes-mcp and served by TiTiler / MMGIS
-_DATA_DIR = Path(os.environ.get("MMGIS_DATA_DIR", "/data/layers"))
-
-
 def _ensure_data_dir() -> Path:
     """Create the data directory on first use (not at import time)."""
-    _DATA_DIR.mkdir(parents=True, exist_ok=True)
-    return _DATA_DIR
-
-# External base URL at which the RCMES API (FastAPI) serves /data/layers/
-# e.g. http://localhost:8000/files — used to build URLs MMGIS can reach
-_RCMES_EXTERNAL_URL = os.environ.get("RCMES_EXTERNAL_URL", "http://localhost:8000")
-
+    data_dir = Path(os.environ.get("MMGIS_DATA_DIR", str(Path.home() / ".rcmes" / "layers")))
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
 
 def _rcmes_file_url(filename: str) -> str:
     """Return the public URL for a file written to _DATA_DIR."""
-    return f"{_RCMES_EXTERNAL_URL.rstrip('/')}/files/{filename}"
+    base = os.environ.get("RCMES_EXTERNAL_URL", "http://localhost:8502")
+    return f"{base.rstrip('/')}/files/{filename}"
 
 
 # ─── Tool 1: Export as Cloud-Optimized GeoTIFF ────────────────────────────
