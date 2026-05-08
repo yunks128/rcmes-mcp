@@ -2243,6 +2243,8 @@ async def mmgis_proxy(path: str, request: Request):
     skip = {"host", "connection", "transfer-encoding", "te", "trailers", "upgrade"}
     fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in skip}
     fwd_headers["host"] = _MMGIS_INTERNAL_URL.split("//", 1)[-1].split("/")[0]
+    # Request uncompressed so the proxy can forward raw bytes without encoding mismatch
+    fwd_headers["accept-encoding"] = "identity"
 
     async with _httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
         resp = await client.request(
@@ -2255,6 +2257,7 @@ async def mmgis_proxy(path: str, request: Request):
     # Rewrite Location headers so redirects stay within the proxy
     resp_headers = dict(resp.headers)
     resp_headers.pop("transfer-encoding", None)
+    resp_headers.pop("content-encoding", None)
     if "location" in resp_headers:
         loc = resp_headers["location"]
         mmgis_base = _MMGIS_INTERNAL_URL.rstrip("/")
