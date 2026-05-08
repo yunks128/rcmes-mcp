@@ -2231,7 +2231,7 @@ async def mmgis_proxy(path: str, request: Request):
     """Transparent reverse proxy to the internal MMGIS container."""
     import httpx as _httpx
 
-    target = f"{_MMGIS_INTERNAL_URL.rstrip('/')}/{path}"
+    target = f"{_MMGIS_INTERNAL_URL.rstrip('/')}/mmgis/{path}"
     qs = request.url.query
     if qs:
         target = f"{target}?{qs}"
@@ -2259,7 +2259,8 @@ async def mmgis_proxy(path: str, request: Request):
         loc = resp_headers["location"]
         mmgis_base = _MMGIS_INTERNAL_URL.rstrip("/")
         if loc.startswith(mmgis_base):
-            resp_headers["location"] = "/mmgis" + loc[len(mmgis_base):]
+            # Strip the internal base; /mmgis prefix already present in path
+            resp_headers["location"] = loc[len(mmgis_base):]
 
     from fastapi.responses import Response as _Resp
     return _Resp(
