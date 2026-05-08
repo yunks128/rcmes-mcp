@@ -29,7 +29,7 @@ load_dotenv()
 import io
 
 import xarray as xr
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -2215,8 +2215,61 @@ async def serve_layer_file(filename: str):
 
 
 # ============================================================================
-# Static File Serving (React Frontend)
+# MMGIS Reverse Proxy
+# Forwards /mmgis/* → http://localhost:2888/* so MMGIS is reachable through
+# the already-open port 8502 without needing a separate firewall rule.
 # ============================================================================
+
+_MMGIS_INTERNAL_URL = os.environ.get("MMGIS_URL", "http://localhost:2888")
+
+
+@app.api_route(
+    "/mmgis/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+)
+async def mmgis_proxy(path: str, request: Request):
+    """Transparent reverse proxy to the internal MMGIS container."""
+    import httpx as _httpx
+
+    target = f"{_MMGIS_INTERNAL_URL.rstrip('/')}/{path}"
+    qs = request.url.query
+    if qs:
+        target = f"{target}?{qs}"
+
+    # Forward the body for non-GET requests
+    body = await request.body()
+
+    # Strip hop-by-hop headers; rewrite Host
+    skip = {"host", "connection", "transfer-encoding", "te", "trailers", "upgrade"}
+    fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in skip}
+    fwd_headers["host"] = _MMGIS_INTERNAL_URL.split("//", 1)[-1].split("/")[0]
+
+    async with _httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+        resp = await client.request(
+            method=request.method,
+            url=target,
+            headers=fwd_headers,
+            content=body,
+        )
+
+    # Rewrite Location headers so redirects stay within the proxy
+    resp_headers = dict(resp.headers)
+    resp_headers.pop("transfer-encoding", None)
+    if "location" in resp_headers:
+        loc = resp_headers["location"]
+        mmgis_base = _MMGIS_INTERNAL_URL.rstrip("/")
+        if loc.startswith(mmgis_base):
+            resp_headers["location"] = "/mmgis" + loc[len(mmgis_base):]
+
+    from fastapi.responses import Response as _Resp
+    return _Resp(
+        content=resp.content,
+        status_code=resp.status_code,
+        headers=resp_headers,
+        media_type=resp.headers.get("content-type"),
+    )
+
+
 
 # Serve React app static files if built
 if STATIC_DIR.exists():

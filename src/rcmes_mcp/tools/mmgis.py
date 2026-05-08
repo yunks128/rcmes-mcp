@@ -472,7 +472,7 @@ def push_layer_to_mmgis(
         }
 
     version = result.get("version", "?")
-    browser_url = f"{mmgis_external.rstrip('/')}/{resolved_mission}"
+    browser_url = f"{mmgis_external.rstrip('/')}/?mission={resolved_mission}"
 
     logger.info(
         "Pushed layer '%s' to MMGIS mission '%s' v%s → %s",
