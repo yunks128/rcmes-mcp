@@ -1235,6 +1235,81 @@ def _get_chat_tools() -> list[dict]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "export_climate_geotiff",
+                "description": (
+                    "Export a climate dataset to a Cloud-Optimized GeoTIFF (COG) so it can be "
+                    "displayed as a raster tile layer in MMGIS. Returns a cog_url. "
+                    "Use BEFORE push_layer_to_mmgis for raster/tile layers."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string", "description": "Dataset ID to export"},
+                        "variable": {"type": "string", "description": "Variable name (e.g. 'tas', 'pr'). Auto-detected if omitted."},
+                        "time_aggregation": {
+                            "type": "string",
+                            "enum": ["mean", "max", "min", "std", "none"],
+                            "description": "How to collapse the time dimension. Default: mean",
+                        },
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "export_climate_geojson",
+                "description": (
+                    "Export a climate dataset as a GeoJSON FeatureCollection (vector points with climate values). "
+                    "Returns a geojson_url. Use BEFORE push_layer_to_mmgis for vector layers."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string", "description": "Dataset ID to export"},
+                        "variable": {"type": "string", "description": "Variable name. Auto-detected if omitted."},
+                        "statistic": {
+                            "type": "string",
+                            "enum": ["mean", "max", "min", "trend"],
+                            "description": "Statistic to compute. Default: mean",
+                        },
+                    },
+                    "required": ["dataset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "push_layer_to_mmgis",
+                "description": (
+                    "Push a geospatial layer into the live MMGIS map. "
+                    "For raster data: use layer_type='tile' with cog_url from export_climate_geotiff. "
+                    "For vector data: use layer_type='vector' with geojson_url from export_climate_geojson. "
+                    "Returns browser_url — the direct link to open the MMGIS map showing the new layer."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "layer_name": {"type": "string", "description": "Display name for the layer in MMGIS"},
+                        "data_url": {"type": "string", "description": "cog_url or geojson_url from export step"},
+                        "layer_type": {
+                            "type": "string",
+                            "enum": ["tile", "vector"],
+                            "description": "tile for raster COG, vector for GeoJSON. Default: tile",
+                        },
+                        "colormap": {"type": "string", "description": "Colormap name e.g. RdBu_r, viridis, plasma. Default: RdBu_r"},
+                        "description": {"type": "string", "description": "Human-readable description of the layer"},
+                        "opacity": {"type": "number", "description": "Layer opacity 0.0-1.0. Default: 0.8"},
+                    },
+                    "required": ["layer_name", "data_url"],
+                },
+            },
+        },
     ]
 
 
@@ -1289,6 +1364,9 @@ _CHAT_TOOL_IMPLS: dict[str, Any] = {
     "validate_ensemble_weighting": analysis.validate_ensemble_weighting,
     "combine_scenarios_weighted": analysis.combine_scenarios_weighted,
     "execute_python_code": code_execution.execute_python_code,
+    "export_climate_geotiff": mmgis.export_climate_geotiff,
+    "export_climate_geojson": mmgis.export_climate_geojson,
+    "push_layer_to_mmgis": mmgis.push_layer_to_mmgis,
     "prepare_download": None,  # Handled inline below
 }
 
@@ -1502,7 +1580,16 @@ def _build_system_prompt() -> str:
         "3. Then call `load_climate_data` using those lat/lon bounds (add ~1 degree buffer)\n"
         "4. Then call `mask_by_country` to clip the data precisely to the country's borders\n"
         "NEVER load global data when a country is specified. Always use the country's bounding box.\n"
-        "This is critical for performance — global data is extremely large and slow to process."
+        "This is critical for performance — global data is extremely large and slow to process.\n\n"
+
+        "## Pushing results to MMGIS\n"
+        "You CAN push climate analysis results directly into the live MMGIS map. "
+        "Use this workflow when the user asks to 'push to MMGIS', 'show on map', or 'visualize in MMGIS':\n"
+        "1. export_climate_geotiff(dataset_id) → returns cog_url\n"
+        "2. push_layer_to_mmgis(layer_name, cog_url, layer_type='tile', colormap='RdBu_r') → returns browser_url\n"
+        "Then tell the user to open the browser_url to see the layer in MMGIS.\n"
+        "For vector/point data, use export_climate_geojson + layer_type='vector' instead.\n"
+        "MMGIS is already running and connected — always attempt the push, never say you can't do it."
     )
 
 
