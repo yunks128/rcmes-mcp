@@ -14,7 +14,7 @@ export default function HowItWorks({ onClose }: { onClose: () => void }) {
         <div className="hiw-body">
 
           <section className="hiw-section">
-            <h3>🌍 What is RCMES Climate Assistant?</h3>
+            <h3>What is RCMES Climate Assistant?</h3>
             <p>
               RCMES (Regional Climate Model Evaluation System) is a NASA climate analysis platform.
               This assistant gives you a conversational interface to <strong>38 TB of NASA's NEX-GDDP-CMIP6 climate projections</strong> —
@@ -23,7 +23,7 @@ export default function HowItWorks({ onClose }: { onClose: () => void }) {
           </section>
 
           <section className="hiw-section">
-            <h3>🔄 Architecture</h3>
+            <h3>Architecture</h3>
             <div className="hiw-steps">
               <div className="hiw-step">
                 <span className="hiw-step-num">1</span>
@@ -64,18 +64,17 @@ export default function HowItWorks({ onClose }: { onClose: () => void }) {
           </section>
 
           <section className="hiw-section">
-            <h3>🛠️ Available Tools</h3>
+            <h3>Available Tools</h3>
             <div className="hiw-tools-grid">
               {[
-                { icon: '📥', label: 'Data Access', desc: 'Load CMIP6 climate data by model, scenario, region, variable, and time range' },
-                { icon: '✂️', label: 'Processing', desc: 'Temporal/spatial subsetting, regridding, and unit conversion' },
-                { icon: '📊', label: 'Analysis', desc: 'Statistics, trend detection, climatology, and ensemble comparisons' },
-                { icon: '🌡️', label: 'Climate Indices', desc: 'ETCCDI indices, heatwaves, drought metrics, and extreme event analysis' },
-                { icon: '🗺️', label: 'Visualization', desc: 'Maps, time-series plots, Taylor diagrams, Hovmöller diagrams' },
-                { icon: '📡', label: 'MMGIS Push', desc: 'Export GeoTIFFs and publish live map layers to NASA MMGIS' },
+                { label: 'Data Access', desc: 'Load CMIP6 climate data by model, scenario, region, variable, and time range' },
+                { label: 'Processing', desc: 'Temporal/spatial subsetting, regridding, and unit conversion' },
+                { label: 'Analysis', desc: 'Statistics, trend detection, climatology, and ensemble comparisons' },
+                { label: 'Climate Indices', desc: 'ETCCDI indices, heatwaves, drought metrics, and extreme event analysis' },
+                { label: 'Visualization', desc: 'Maps, time-series plots, Taylor diagrams, Hovmöller diagrams' },
+                { label: 'MMGIS Push', desc: 'Export GeoTIFFs and publish live map layers to NASA MMGIS' },
               ].map(t => (
                 <div key={t.label} className="hiw-tool-card">
-                  <span className="hiw-tool-icon">{t.icon}</span>
                   <strong>{t.label}</strong>
                   <p>{t.desc}</p>
                 </div>
@@ -84,7 +83,7 @@ export default function HowItWorks({ onClose }: { onClose: () => void }) {
           </section>
 
           <section className="hiw-section">
-            <h3>📡 Data Source</h3>
+            <h3>Data Source</h3>
             <p>
               <strong>NASA NEX-GDDP-CMIP6</strong> — 35 climate models × 5 scenarios (SSP1-2.6, SSP2-4.5, SSP3-7.0, SSP5-8.5, historical),
               9 variables (temperature, precipitation, humidity, radiation, wind), 1950–2100.
@@ -98,10 +97,10 @@ export default function HowItWorks({ onClose }: { onClose: () => void }) {
               View on GitHub
             </a>
             <a href="https://www.nccs.nasa.gov/services/data-collections/land-based-products/nex-gddp-cmip6" target="_blank" rel="noopener noreferrer">
-              🌐 NEX-GDDP-CMIP6 Dataset
+              NEX-GDDP-CMIP6 Dataset
             </a>
             <a href="/mmgis/?mission=climate" target="_blank" rel="noopener noreferrer">
-              🗺️ Open MMGIS Map
+              Open MMGIS Map
             </a>
           </section>
 
@@ -110,3 +109,4 @@ export default function HowItWorks({ onClose }: { onClose: () => void }) {
     </div>
   );
 }
+
